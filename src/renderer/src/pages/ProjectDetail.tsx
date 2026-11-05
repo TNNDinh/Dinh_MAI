@@ -1,4 +1,4 @@
-import { ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
+import { Archive, ArchiveRestore, ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { PROJECT_TYPES, type Project, type ProjectStatus, type ProjectType } from '../../../shared/ipc'
 import { useStudio } from '../store'
@@ -14,6 +14,7 @@ export function ProjectDetail({ project }: { project: Project }) {
   const [status, setStatus] = useState<ProjectStatus>(project.status)
   const [budget, setBudget] = useState(project.budgetUsd === null ? '' : String(project.budgetUsd))
   const [maxIter, setMaxIter] = useState(String(project.maxIterations))
+  const [autoRecovery, setAutoRecovery] = useState(project.autoRecovery)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -25,7 +26,8 @@ export function ProjectDetail({ project }: { project: Project }) {
     type !== project.type ||
     status !== project.status ||
     budget !== (project.budgetUsd === null ? '' : String(project.budgetUsd)) ||
-    maxIter !== String(project.maxIterations)
+    maxIter !== String(project.maxIterations) ||
+    autoRecovery !== project.autoRecovery
 
   async function save() {
     setBusy(true)
@@ -41,10 +43,28 @@ export function ProjectDetail({ project }: { project: Project }) {
         type,
         status,
         budgetUsd: budgetNum,
-        maxIterations: Number(maxIter) || project.maxIterations
+        maxIterations: Number(maxIter) || project.maxIterations,
+        autoRecovery
       })
       await refresh()
       setSaved(true)
+    } catch (e) {
+      setError(errMsg(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Archiving only changes the status: the project, its history and its files stay exactly as they are. */
+  async function setArchived(archived: boolean) {
+    setBusy(true)
+    setError(null)
+    try {
+      const next: ProjectStatus = archived ? 'archived' : 'active'
+      await window.api.invoke('projects:update', { id: project.id, status: next })
+      setStatus(next)
+      await refresh()
+      if (archived) openProject(null)
     } catch (e) {
       setError(errMsg(e))
     } finally {
@@ -112,6 +132,16 @@ export function ProjectDetail({ project }: { project: Project }) {
                 <Input type="number" min="1" max="50" value={maxIter} onChange={(e) => setMaxIter(e.target.value)} />
               </Field>
             </div>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-line bg-elev/40 p-3">
+              <input type="checkbox" className="mt-0.5" checked={autoRecovery} onChange={(e) => setAutoRecovery(e.target.checked)} data-auto-recovery />
+              <span className="text-xs">
+                <span className="font-medium text-fg">Auto Recovery</span>
+                <span className="mt-0.5 block text-muted">
+                  Before each agent task a checkpoint is saved (if the project is a git repository). When a task fails, the files it changed with the file tools are put back before
+                  the retry, and the agent is told why. Changes made by shell commands are not undone, and stopping a run never rolls anything back.
+                </span>
+              </span>
+            </label>
             {error && (
               <div role="alert" className="rounded-md border border-err/30 bg-err/10 px-3 py-2 text-xs text-err">
                 {error}
@@ -136,6 +166,21 @@ export function ProjectDetail({ project }: { project: Project }) {
                 <Badge tone={project.status === 'active' ? 'accent' : 'neutral'}>{project.status}</Badge>
               </div>
               <p className="pt-1 text-[11px] text-faint">Progress is the share of finished tasks on the project’s task board.</p>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader title="Archive" />
+            <div className="space-y-2 p-4">
+              <p className="text-xs text-muted">
+                {project.status === 'archived'
+                  ? 'This project is archived: it is hidden from the main list. Restore it to work on it again.'
+                  : 'Move this project out of the way without losing anything. Tasks, runs, usage and files are kept.'}
+              </p>
+              <Button size="sm" disabled={busy} onClick={() => void setArchived(project.status !== 'archived')} data-archive-toggle>
+                {project.status === 'archived' ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+                {project.status === 'archived' ? 'Restore project' : 'Archive project'}
+              </Button>
             </div>
           </Card>
 

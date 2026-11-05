@@ -8,8 +8,11 @@ import {
   type AssetOperation,
   type GenerateAssetInput,
   type GenerateAssetResult,
+  type ImportAssetsInput,
+  type ImportAssetsResult,
   type ImageModelOption,
-  type ProcessAssetInput
+  type ProcessAssetInput,
+  type ScanAssetsResult
 } from '../../shared/ipc'
 import type { Database } from '../db/database'
 import { PROVIDER_CATALOG } from '../providers/catalog'
@@ -19,13 +22,17 @@ import type { GeneratedImage } from '../providers/types'
 import type { ConnectionService } from '../services/connections'
 import { redactSecret } from '../services/connections'
 import type { EventService } from '../services/events'
-import { WorkspaceError, type Sandbox } from '../workspace/sandbox'
+import { WorkspaceError, isSecretPath, type Sandbox } from '../workspace/sandbox'
 import type { WorkspaceService } from '../workspace/workspace'
 import { FORMAT_EXT, FORMAT_MIME, decodeImage, imageFormat, imageSize } from './codec'
-import { assetFolder, suggestName, uniquePath } from './conventions'
+import { assetFolder, guessKind, suggestName, uniquePath } from './conventions'
 import { MAX_PIXELS, PixelError, encodePng, fitRaster, hasTransparency, removeBackground, resizeRaster, trimRaster, type Raster } from './pixels'
 
 export const MAX_PROMPT_CHARS = 4000
+
+const IMPORT_EXT = /\.(png|jpe?g|webp|gif)$/i
+/** Largest picture the library will take over (the same cap as the binary writer). */
+const IMPORT_MAX_BYTES = 25_000_000
 
 interface AssetRow {
   id: string
@@ -43,7 +50,7 @@ interface AssetRow {
   parent_asset_id: string | null
   metadata_json: string
   created_at: number
-  origin: 'generated' | 'processed'
+  origin: 'generated' | 'processed' | 'imported'
   bytes: number
   connection_name: string | null
 }
@@ -551,6 +558,80 @@ export class AssetService {
       default:
         throw new Error('That operation is not supported.')
     }
+  }
+
+  // ------------------------------------------------------------------ importing pictures that are already in the project
+
+  /** Picture files in the project folder (outside ignored folders such as node_modules) that the library does not list yet. */
+  async scan(projectId: string): Promise<ScanAssetsResult> {
+    this.workspace.project(projectId)
+    const sb = this.workspace.sandbox(projectId)
+    const known = new Set(this.db.all<{ rel_path: string }>('SELECT rel_path FROM assets WHERE project_id = ?', projectId).map((r) => r.rel_path.toLowerCase()))
+    const { files, truncated } = await sb.walk('', { includeBinary: true, maxFileBytes: IMPORT_MAX_BYTES, max: 20_000 })
+    const found = files.filter((f) => IMPORT_EXT.test(f.path) && !isSecretPath(f.path) && !known.has(f.path.toLowerCase())).map((f) => ({ path: f.path, bytes: f.size }))
+    return { files: found.slice(0, 500), truncated: truncated || found.length > 500 }
+  }
+
+  /**
+   * Adds existing pictures to the library. The files are not copied, moved or changed: the library just starts listing them.
+   * The real format and size are read from the file; anything that is not a decodable picture is skipped with the reason.
+   */
+  async importFiles(input: ImportAssetsInput): Promise<ImportAssetsResult> {
+    this.workspace.project(input.projectId)
+    if (!Array.isArray(input.paths) || input.paths.length === 0) throw new Error('Choose at least one picture to import.')
+    if (input.paths.length > 200) throw new Error('Import at most 200 pictures at a time.')
+    if (input.kind && !KINDS.has(input.kind)) throw new Error(`Unknown picture kind "${input.kind}".`)
+    const sb = this.workspace.sandbox(input.projectId)
+    const result: ImportAssetsResult = { imported: [], skipped: [] }
+    const seen = new Set<string>()
+    for (const raw of input.paths) {
+      const path = String(raw)
+      try {
+        const resolved = sb.resolve(path)
+        if (seen.has(resolved.rel.toLowerCase())) continue
+        seen.add(resolved.rel.toLowerCase())
+        if (isSecretPath(resolved.rel)) throw new Error('Credential files are never added to the library.')
+        if (!IMPORT_EXT.test(resolved.rel)) throw new Error('Only PNG, JPEG, WebP and GIF pictures can be imported.')
+        const already = this.db.get<{ id: string }>('SELECT id FROM assets WHERE project_id = ? AND lower(rel_path) = lower(?)', input.projectId, resolved.rel)
+        if (already) throw new Error('Already in the library.')
+        const buf = await sb.readBinary(resolved.rel, { maxBytes: IMPORT_MAX_BYTES })
+        const format = imageFormat(buf)
+        if (!format) throw new Error('Not a PNG, JPEG, WebP or GIF picture (the file content does not match).')
+        const size = imageSize(buf)
+        let transparent = false
+        if (format === 'png' && size && size.width * size.height <= MAX_PIXELS) {
+          try {
+            transparent = hasTransparency(decodeImage(buf))
+          } catch {
+            /* an undecodable PNG is still listed; transparency is just unknown (shown as opaque) */
+          }
+        }
+        const id = randomUUID()
+        const kind = input.kind ?? guessKind(resolved.rel.replace(/[/\\._-]+/g, ' '))
+        this.db.run(
+          `INSERT INTO assets (id, project_id, task_id, kind, name, rel_path, prompt, connection_id, model, width, height, transparent, parent_asset_id, metadata_json, created_at, origin, bytes)
+           VALUES (?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, NULL, ?, ?, 'imported', ?)`,
+          id,
+          input.projectId,
+          kind,
+          posix.basename(resolved.rel),
+          resolved.rel,
+          size?.width ?? null,
+          size?.height ?? null,
+          transparent ? 1 : 0,
+          JSON.stringify({ note: 'Added to the library from a file that was already in the project.' }),
+          this.now(),
+          buf.length
+        )
+        result.imported.push(this.get(id))
+      } catch (e) {
+        result.skipped.push({ path, reason: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    if (result.imported.length) {
+      this.events.record({ projectId: input.projectId, type: 'asset.imported', message: `Added ${result.imported.length} existing picture${result.imported.length === 1 ? '' : 's'} to the library` })
+    }
+    return result
   }
 
   // ------------------------------------------------------------------ deleting

@@ -46,6 +46,11 @@ export interface Project {
   progress: number
   budgetUsd: number | null
   maxIterations: number
+  /**
+   * Opt-in Auto Recovery: a checkpoint is saved before each agent task, and when a task fails the files it changed through
+   * the write/delete tools are put back before it is retried.
+   */
+  autoRecovery: boolean
   createdAt: number
   updatedAt: number
 }
@@ -69,6 +74,7 @@ export interface UpdateProjectInput {
   status?: ProjectStatus
   budgetUsd?: number | null
   maxIterations?: number
+  autoRecovery?: boolean
 }
 
 export interface FolderInspection {
@@ -272,6 +278,20 @@ export interface ModelUsageRow {
   failedCalls: number
 }
 
+/** Usage of one agent (all its model calls). agentId is null for calls whose agent was deleted or that no agent made (Playground). */
+export interface AgentUsageRow {
+  agentId: string | null
+  agentName: string
+  role: string | null
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  /** Sum over priced calls only. */
+  costUsd: number
+  unpricedCalls: number
+  failedCalls: number
+}
+
 // ------------------------------------------------------------------ agents (Phase 4)
 
 export type AgentKind = 'chat' | 'image'
@@ -346,6 +366,8 @@ export interface CreateAgentInput {
 export interface UpdateAgentInput {
   id: string
   name?: string
+  /** A template key of the same kind (chat/image) or 'custom'. The prompt and permissions are not changed. */
+  role?: string
   connectionId?: string | null
   model?: string | null
   systemPrompt?: string
@@ -415,6 +437,27 @@ export interface TaskLogEntry {
   agentName: string | null
   content: string
   createdAt: number
+}
+
+/** One line of the team conversation: an agent's reply on a task, or a change request one agent sent to another. */
+export interface TeamMessage {
+  id: string
+  kind: 'reply' | 'change-request'
+  projectId: string
+  projectName: string
+  taskId: string | null
+  taskTitle: string | null
+  agentId: string | null
+  agentName: string | null
+  /** Clipped for the feed; the full text is in the task's log. */
+  content: string
+  createdAt: number
+}
+
+export interface TeamMessagesInput {
+  projectId?: string
+  /** Default 40, at most 200. */
+  limit?: number
 }
 
 export interface TaskDetail extends Task {
@@ -629,9 +672,127 @@ export interface CommandPolicyInfo {
   blocked: string[]
 }
 
+// ------------------------------------------------------------------ git, checkpoints (Phase 9)
+
+export interface GitFileChange {
+  /** Project-relative, forward slashes. */
+  path: string
+  /** Status letter in the index (staged side) and in the working tree: M A D R C U ? or ' '. */
+  index: string
+  worktree: string
+  /** For renames: where the file came from. */
+  from?: string
+  /** Looks like a credential file (.env, keys…): never staged by the app and never shown in a diff. */
+  secret: boolean
+}
+
+export interface GitStatus {
+  /** False when the project folder is not a git repository (nothing else is filled in then). */
+  isRepo: boolean
+  /** git itself could not be started (not installed / not on PATH). */
+  gitMissing: boolean
+  branch: string | null
+  detached: boolean
+  hasCommits: boolean
+  head: string | null
+  files: GitFileChange[]
+  clean: boolean
+}
+
+export interface GitCommitInfo {
+  sha: string
+  short: string
+  subject: string
+  author: string
+  /** Epoch ms. */
+  date: number
+}
+
+export interface GitBranchInfo {
+  name: string
+  current: boolean
+}
+
+export interface GitDiffInput {
+  projectId: string
+  path: string
+  /** true = what is staged; false = unstaged changes (untracked files show as all-added). */
+  staged?: boolean
+}
+
+export interface GitDiffResult {
+  path: string
+  text: string
+  truncated: boolean
+  /** The file is binary or a credential file: no text is shown. */
+  note: string | null
+}
+
+export interface GitCommitInput {
+  projectId: string
+  message: string
+  /** Files to commit; omitted = every changed file except credential files. */
+  paths?: string[]
+}
+
+export interface GitCommitResult {
+  sha: string
+  short: string
+  committed: number
+  /** Credential-looking files that were left out. */
+  skippedSecrets: string[]
+}
+
+/** A saved snapshot of the project's files, taken without touching your branch, index or history. */
+export interface Checkpoint {
+  id: string
+  projectId: string
+  runId: string | null
+  taskId: string | null
+  label: string
+  /** The snapshot commit (kept under refs/mads/checkpoints, not on any branch). */
+  gitRef: string
+  branch: string | null
+  /** 'manual' by you, 'auto' before an agent task, 'safety' before a restore. */
+  kind: 'manual' | 'auto' | 'safety'
+  fileCount: number
+  createdAt: number
+}
+
+export interface RestoreResult {
+  restored: number
+  removed: number
+  /** The checkpoint made just before restoring, so the restore itself can be undone. */
+  safetyCheckpointId: string
+}
+
 // ------------------------------------------------------------------ contract
 
 export interface IpcContract {
+  'git:status': (projectId: string) => GitStatus
+  /** Turns the project folder into a git repository (git init). */
+  'git:init': (projectId: string) => GitStatus
+  'git:log': (input: { projectId: string; limit?: number }) => GitCommitInfo[]
+  'git:diff': (input: GitDiffInput) => GitDiffResult
+  /** Commits as you. Hooks are not run. There is no push, pull or remote access in this app. */
+  'git:commit': (input: GitCommitInput) => GitCommitResult
+  'git:branches': (projectId: string) => GitBranchInfo[]
+  'git:switch': (input: { projectId: string; branch: string; create?: boolean }) => GitStatus
+  'checkpoints:list': (projectId: string) => Checkpoint[]
+  'checkpoints:create': (input: { projectId: string; label?: string }) => Checkpoint
+  /** Puts the project's files back to the snapshot (after taking a safety checkpoint). */
+  'checkpoints:restore': (input: { id: string }) => RestoreResult
+  'checkpoints:remove': (id: string) => void
+  'automation:detect': (projectId: string) => AutomationTask[]
+  /** Starts the project's own build/test/lint/typecheck command; progress arrives on the automation channel. Returns the run at once. */
+  'automation:run': (input: { projectId: string; kind: AutomationKind }) => AutomationRun
+  /** Latest runs for the project, newest first. */
+  'automation:list': (projectId: string) => AutomationRun[]
+  'automation:cancel': (id: string) => boolean
+  'preview:options': (projectId: string) => PreviewOptions
+  'preview:get': (projectId: string) => PreviewInfo | null
+  'preview:start': (input: { projectId: string; mode: PreviewMode; folder?: string }) => PreviewInfo
+  'preview:stop': (projectId: string) => void
   /** Plans the goal with the project's Project Manager agent, then runs the team. Returns immediately; progress arrives as activity events. */
   'runs:start': (input: StartRunInput) => Run
   'runs:list': (projectId?: string) => Run[]
@@ -653,6 +814,7 @@ export interface IpcContract {
   'workflows:runState': (runId: string) => WorkflowRunState
   'tasks:list': (filter?: TaskFilter) => Task[]
   'tasks:get': (id: string) => TaskDetail | null
+  'tasks:team': (input?: TeamMessagesInput) => TeamMessage[]
   'tasks:create': (input: CreateTaskInput) => Task
   'tasks:update': (input: UpdateTaskInput) => Task
   'tasks:remove': (id: string) => void
@@ -679,6 +841,10 @@ export interface IpcContract {
   'chat:start': (input: ChatStartInput) => string
   'chat:cancel': (requestId: string) => void
   'usage:byModel': () => ModelUsageRow[]
+  /** Usage per agent, optionally limited to one project. */
+  'usage:byAgent': (input?: { projectId?: string }) => AgentUsageRow[]
+  /** Starts watching this project's folder for changes made by other programs (stops watching the previous project). null stops. */
+  'fs:watch': (projectId: string | null) => boolean
   'fs:list': (input: { projectId: string; path?: string; includeIgnored?: boolean }) => DirListing
   'fs:read': (input: { projectId: string; path: string }) => FileContent
   /** Saves a file as the user. Refused while an agent holds the file's lock, or if it changed on disk since `fs:read`. */
@@ -705,6 +871,10 @@ export interface IpcContract {
   'assets:generate': (input: GenerateAssetInput) => GenerateAssetResult
   'assets:cancel': (requestId: string) => boolean
   'assets:process': (input: ProcessAssetInput) => AssetItem
+  /** Picture files in the project folder that are not in the library (added by hand, or by a tool). */
+  'assets:scan': (projectId: string) => ScanAssetsResult
+  /** Adds existing picture files to the library without copying or changing them. */
+  'assets:import': (input: ImportAssetsInput) => ImportAssetsResult
   'assets:remove': (input: { id: string; deleteFile: boolean }) => void
   'assets:reveal': (id: string) => void
   /** Price of one picture for an image model (USD). null clears it. */
@@ -730,6 +900,25 @@ export type IpcChannel = keyof IpcContract
 
 /** Runtime allow-list; typed so a channel cannot be forgotten. */
 export const IPC_CHANNELS: Record<IpcChannel, true> = {
+  'git:status': true,
+  'git:init': true,
+  'git:log': true,
+  'git:diff': true,
+  'git:commit': true,
+  'git:branches': true,
+  'git:switch': true,
+  'checkpoints:list': true,
+  'checkpoints:create': true,
+  'checkpoints:restore': true,
+  'checkpoints:remove': true,
+  'automation:detect': true,
+  'automation:run': true,
+  'automation:list': true,
+  'automation:cancel': true,
+  'preview:options': true,
+  'preview:get': true,
+  'preview:start': true,
+  'preview:stop': true,
   'runs:start': true,
   'runs:list': true,
   'runs:stop': true,
@@ -744,6 +933,7 @@ export const IPC_CHANNELS: Record<IpcChannel, true> = {
   'workflows:runState': true,
   'tasks:list': true,
   'tasks:get': true,
+  'tasks:team': true,
   'tasks:create': true,
   'tasks:update': true,
   'tasks:remove': true,
@@ -766,6 +956,8 @@ export const IPC_CHANNELS: Record<IpcChannel, true> = {
   'chat:start': true,
   'chat:cancel': true,
   'usage:byModel': true,
+  'usage:byAgent': true,
+  'fs:watch': true,
   'fs:list': true,
   'fs:read': true,
   'fs:write': true,
@@ -787,6 +979,8 @@ export const IPC_CHANNELS: Record<IpcChannel, true> = {
   'assets:generate': true,
   'assets:cancel': true,
   'assets:process': true,
+  'assets:scan': true,
+  'assets:import': true,
   'assets:remove': true,
   'assets:reveal': true,
   'images:setPrice': true,
@@ -814,6 +1008,10 @@ export const TERMINAL_CHANNEL = 'terminal:event'
 export const APPROVAL_CHANNEL = 'approvals:changed'
 /** A file was changed by an agent or the user. */
 export const FS_CHANNEL = 'fs:changed'
+/** A build/test run started, produced output or finished (full AutomationRun each time). */
+export const AUTOMATION_CHANNEL = 'automation:update'
+/** The live preview changed state, or a served file changed. */
+export const PREVIEW_CHANNEL = 'preview:update'
 
 // ------------------------------------------------------------------ assets (Phase 7)
 
@@ -845,8 +1043,8 @@ export interface AssetItem {
   height: number | null
   transparent: boolean
   parentId: string | null
-  /** 'generated' came straight from an image model; 'processed' was derived from another asset by an editing step. */
-  origin: 'generated' | 'processed'
+  /** 'generated' came straight from an image model; 'processed' was derived from another asset by an editing step; 'imported' is a picture that was already in the project folder. */
+  origin: 'generated' | 'processed' | 'imported'
   bytes: number
   /** What was done to derive it, e.g. "Resized to 64×64". */
   note: string | null
@@ -898,6 +1096,30 @@ export type AssetOperation =
   | { type: 'trim'; padding?: number }
   | { type: 'removeBackground'; tolerance?: number }
 
+/** A picture file inside the project that the library does not know about yet. */
+export interface UntrackedImage {
+  path: string
+  bytes: number
+}
+
+export interface ScanAssetsResult {
+  files: UntrackedImage[]
+  /** True when the folder has so many files that the scan stopped early. */
+  truncated: boolean
+}
+
+export interface ImportAssetsInput {
+  projectId: string
+  paths: string[]
+  /** Kind for every picture; when empty it is guessed from the path (folder and file name). */
+  kind?: AssetKind | null
+}
+
+export interface ImportAssetsResult {
+  imported: AssetItem[]
+  skipped: Array<{ path: string; reason: string }>
+}
+
 export interface ProcessAssetInput {
   id: string
   operation: AssetOperation
@@ -909,7 +1131,90 @@ export interface FsChange {
   projectId: string
   path: string
   kind: 'write' | 'remove' | 'rename'
-  by: 'user' | 'agent'
+  /** 'external' = another program changed the folder (seen by the folder watcher), not this app. */
+  by: 'user' | 'agent' | 'external'
+}
+
+// ------------------------------------------------------------------ build / test automation, preview (Phase 9)
+
+export type AutomationKind = 'build' | 'test' | 'lint' | 'typecheck'
+
+/** A command the project itself defines (an npm script, cargo build…), found by looking at its files. Nothing is invented. */
+export interface AutomationTask {
+  kind: AutomationKind
+  label: string
+  command: string
+  /** What told us: e.g. "package.json scripts.build", "Cargo.toml". */
+  source: string
+}
+
+export interface ProblemItem {
+  severity: 'error' | 'warning'
+  /** Project-relative when the tool printed a path inside the project. */
+  file: string | null
+  line: number | null
+  column: number | null
+  code: string | null
+  message: string
+  /** Which output format it was read from (tsc, eslint, gcc, rustc, go, dotnet, python). */
+  tool: string
+}
+
+export interface TestSummary {
+  passed: number
+  failed: number
+  skipped: number
+  unit: 'tests' | 'packages'
+  /** Names of failing tests, as printed by the runner. */
+  failures: string[]
+  runner: string
+}
+
+export type AutomationStatus = 'running' | 'passed' | 'failed' | 'cancelled' | 'error'
+
+export interface AutomationRun {
+  id: string
+  projectId: string
+  kind: AutomationKind
+  label: string
+  command: string
+  status: AutomationStatus
+  exitCode: number | null
+  /** stdout and stderr, colour codes removed; long output keeps its beginning and end. */
+  output: string
+  truncated: boolean
+  startedAt: number
+  durationMs: number | null
+  problems: ProblemItem[]
+  tests: TestSummary | null
+  message: string | null
+}
+
+export type PreviewMode = 'static' | 'dev'
+export type PreviewStatus = 'starting' | 'running' | 'failed' | 'stopped'
+
+export interface PreviewInfo {
+  projectId: string
+  mode: PreviewMode
+  status: PreviewStatus
+  /** Always a loopback address (127.0.0.1 / localhost). */
+  url: string | null
+  /** Folder that is served (static mode), relative to the project; '' = the project folder. */
+  folder: string
+  command: string | null
+  /** Tail of what the dev server printed. */
+  output: string
+  message: string | null
+  /** Increases when a served file changed, so the page can reload itself. */
+  reloadToken: number
+  startedAt: number
+}
+
+export interface PreviewOptions {
+  /** Folders that contain an index.html, as candidates for the built-in static server. */
+  staticFolders: string[]
+  /** The project's own dev-server command (package.json scripts.dev / start), if it has one. */
+  devCommand: string | null
 }
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: { message: string } }
@@ -925,4 +1230,6 @@ export interface StudioApi {
   onTerminalEvent(cb: (event: TerminalEvent) => void): () => void
   onApprovalsChanged(cb: (pending: PendingApproval[]) => void): () => void
   onFsChange(cb: (change: FsChange) => void): () => void
+  onAutomation(cb: (run: AutomationRun) => void): () => void
+  onPreview(cb: (info: PreviewInfo) => void): () => void
 }

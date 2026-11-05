@@ -2,6 +2,7 @@ import { Send, Square, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Agent, ChatStreamEvent, Connection, ModelEntry } from '../../../../shared/ipc'
 import { fmtTokens } from '../../lib/format'
+import { loadPlayground, savePlayground } from '../../lib/playground-history'
 import { Badge, Button, Input, Textarea, cx } from '../ui'
 import { errMsg } from './StatusBadge'
 
@@ -30,18 +31,20 @@ const costLabel = (c: number | null): string => (c === null ? 'unknown (no price
  * (read-only here) and the calls are billed to that agent: a real end-to-end test of its configuration.
  */
 export function Playground({ connection, agent }: { connection: Connection; agent?: Agent }) {
+  const scope = agent ? `agent:${agent.id}` : `connection:${connection.id}`
+  const saved = useMemo(() => loadPlayground(scope), [scope])
   const [models, setModels] = useState<ModelEntry[]>([])
-  const [model, setModel] = useState(agent?.model ?? '')
-  const [system, setSystem] = useState(agent?.systemPrompt ?? '')
+  const [model, setModel] = useState(agent ? (agent.model ?? '') : (saved.model ?? ''))
+  const [system, setSystem] = useState(agent ? agent.systemPrompt : (saved.system ?? ''))
   const [draft, setDraft] = useState('')
-  const [turns, setTurns] = useState<Turn[]>([])
+  const [turns, setTurns] = useState<Turn[]>(saved.turns)
   const [sendError, setSendError] = useState<string | null>(null)
 
   const activeId = useRef<string | null>(null)
   const startedAt = useRef(0)
   const firstTokenAt = useRef<number | null>(null)
   const early = useRef<ChatStreamEvent[]>([]) // events that beat the `chat:start` reply
-  const nextTurn = useRef(1)
+  const nextTurn = useRef(saved.turns.reduce((m, t) => Math.max(m, t.id), 0) + 1)
   const scroller = useRef<HTMLDivElement>(null)
 
   const streaming = turns.some((t) => t.status === 'streaming')
@@ -108,6 +111,12 @@ export function Playground({ connection, agent }: { connection: Connection; agen
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight })
   }, [turns])
+
+  // Finished turns (and, for a connection, the model and system prompt) are remembered; a turn still streaming is not.
+  useEffect(() => {
+    if (turns.some((t) => t.status === 'streaming')) return
+    savePlayground(scope, agent ? { turns } : { turns, model, system })
+  }, [scope, agent, turns, model, system])
 
   const history = useMemo(
     () => turns.filter((t) => t.status === 'ok').flatMap((t) => [{ role: 'user' as const, content: t.user }, { role: 'assistant' as const, content: t.text }]),
@@ -248,7 +257,7 @@ export function Playground({ connection, agent }: { connection: Connection; agen
             </Button>
           )}
         </div>
-        <p className={cx('mt-1.5 text-[11px] text-faint')}>Conversation history stays in this window only; each call is logged to Usage.</p>
+        <p className={cx('mt-1.5 text-[11px] text-faint')}>The conversation is remembered on this computer (last 40 turns, cleared with Clear); each call is logged to Usage.</p>
       </div>
     </div>
   )

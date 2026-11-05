@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { CreateTaskInput, Task, TaskDetail, TaskFilter, TaskLogEntry, TaskStatus, UpdateTaskInput } from '../../shared/ipc'
+import type { CreateTaskInput, Task, TaskDetail, TaskFilter, TaskLogEntry, TaskStatus, TeamMessage, TeamMessagesInput, UpdateTaskInput } from '../../shared/ipc'
 import { TASK_STATUSES } from '../../shared/ipc'
 import { getTemplate } from '../agents/templates'
 import type { Database } from '../db/database'
@@ -76,6 +76,45 @@ export class TaskService {
       )
       .map((m) => ({ id: m.id, role: m.role, agentId: m.agent_id, agentName: m.name, content: m.content, createdAt: m.created_at }))
     return { ...task, log }
+  }
+
+  /**
+   * The team conversation, newest first: what agents said (their replies, on a task or not, not the prompts, tool calls or raw tool output)
+   * and the change requests they sent each other. Built from the same per-task log as the task drawer.
+   */
+  team(input: TeamMessagesInput = {}): TeamMessage[] {
+    const limit = Number.isInteger(input.limit) ? Math.min(200, Math.max(1, input.limit as number)) : 40
+    const params: Array<string | number> = []
+    let scope = ''
+    if (input.projectId) {
+      scope = 'AND m.project_id = ?'
+      params.push(String(input.projectId))
+    }
+    return this.db
+      .all<{ id: string; role: string; project_id: string; project_name: string; task_id: string | null; title: string | null; agent_id: string | null; agent_name: string | null; content: string; created_at: number }>(
+        `SELECT m.id, m.role, m.project_id, p.name AS project_name, m.task_id, t.title, m.agent_id, a.name AS agent_name, m.content, m.created_at
+           FROM agent_messages m
+           JOIN projects p ON p.id = m.project_id
+           LEFT JOIN tasks t ON t.id = m.task_id
+           LEFT JOIN agents a ON a.id = m.agent_id
+          WHERE ((m.role = 'assistant' AND TRIM(m.content) <> '')
+              OR (m.role = 'system' AND m.content LIKE 'Change request from%')) ${scope}
+          ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`,
+        ...params,
+        limit
+      )
+      .map((m) => ({
+        id: m.id,
+        kind: m.role === 'system' ? ('change-request' as const) : ('reply' as const),
+        projectId: m.project_id,
+        projectName: m.project_name,
+        taskId: m.task_id,
+        taskTitle: m.title,
+        agentId: m.agent_id,
+        agentName: m.agent_name,
+        content: m.content.length > 600 ? `${m.content.slice(0, 600)}…` : m.content,
+        createdAt: m.created_at
+      }))
   }
 
   create(input: NewTask): Task {

@@ -307,6 +307,16 @@ export class AgentService {
       this.assertUniqueName(name, cur.project_id, cur.id)
       set('name', name)
     }
+    let roleChange: string | null = null
+    if (input.role !== undefined && input.role !== cur.role) {
+      const role = String(input.role)
+      const tpl = role === 'custom' ? undefined : getTemplate(role)
+      if (role !== 'custom' && !tpl) throw new Error(`Unknown role “${role}”.`)
+      if (tpl && tpl.kind !== cur.kind) throw new Error(`This is ${cur.kind === 'image' ? 'an image' : 'a chat'} agent: the ${tpl.label} role is for ${tpl.kind === 'image' ? 'image' : 'chat'} agents.`)
+      if (cur.status === 'working') throw new Error('This agent is working right now. Stop the run before changing its role.')
+      set('role', role)
+      roleChange = role
+    }
     if (input.systemPrompt !== undefined) set('system_prompt', cleanPrompt(input.systemPrompt))
     if (input.permissions !== undefined) {
       set('permissions_json', JSON.stringify(normalizePermissions(input.permissions, parseStoredPermissions(cur.permissions_json))))
@@ -343,7 +353,7 @@ export class AgentService {
     if (enabledChange !== null) {
       this.events.record({ projectId: cur.project_id, agentId: cur.id, type: enabledChange ? 'agent.enabled' : 'agent.disabled', message: `Agent “${next.name}” ${enabledChange ? 'enabled' : 'disabled'}` })
     } else if (sets.length > 0) {
-      this.events.record({ projectId: cur.project_id, agentId: cur.id, type: 'agent.updated', message: `Agent “${next.name}” updated` })
+      this.events.record({ projectId: cur.project_id, agentId: cur.id, type: 'agent.updated', message: `Agent “${next.name}” updated${roleChange ? ` (role: ${next.roleLabel})` : ''}` })
     }
     return next
   }

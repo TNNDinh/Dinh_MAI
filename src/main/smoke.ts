@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { app, nativeImage, type BrowserWindow } from 'electron'
@@ -1149,6 +1149,61 @@ export async function runSmokeTest(opts: {
       return msg
     })
 
+    await step('ui_workflow_undo_redo_tidy_and_copy_paste', async () => {
+      const settle = () => new Promise((r) => setTimeout(r, 480)) // the editor groups edits made within 350 ms into one undo step
+      const count = () => wfNodes()
+      const spots = () => js<string>(`JSON.stringify([...document.querySelectorAll('[data-wf-node]')].map((n) => [n.getAttribute('data-wf-node'), n.closest('.react-flow__node').style.transform]).sort())`)
+      const press = (key: string, extra = '') => js(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '${key}', ctrlKey: true, ${extra} bubbles: true, cancelable: true }))`)
+      const click = (action: string) => js(`document.querySelector('[data-wf-action="${action}"]').click()`)
+      if ((await count()) !== 4) throw new Error(`expected 4 steps, found ${await count()}`)
+      const off = (a: string) => js<boolean>(`document.querySelector('[data-wf-action="${a}"]').disabled`)
+
+      // add a step: it lands at an arbitrary spot, so tidy must move it
+      await settle()
+      await js(`document.querySelector('[data-wf-palette-item="agent"]').click()`)
+      await waitFor('fifth step', `document.querySelectorAll('[data-wf-node]').length === 5`)
+      await settle()
+      const beforeTidy = await spots()
+      await click('tidy')
+      await waitFor('layout changed', `JSON.stringify([...document.querySelectorAll('[data-wf-node]')].map((n) => [n.getAttribute('data-wf-node'), n.closest('.react-flow__node').style.transform]).sort()) !== ${JSON.stringify(beforeTidy)}`)
+      const tidy = await spots()
+      await settle()
+
+      // undo puts the step back where it was, redo tidies again
+      await click('undo')
+      await waitFor('undo tidy', `JSON.stringify([...document.querySelectorAll('[data-wf-node]')].map((n) => [n.getAttribute('data-wf-node'), n.closest('.react-flow__node').style.transform]).sort()) === ${JSON.stringify(beforeTidy)}`)
+      if (await off('redo')) throw new Error('redo is disabled after an undo')
+      await click('redo')
+      await waitFor('redo tidy', `JSON.stringify([...document.querySelectorAll('[data-wf-node]')].map((n) => [n.getAttribute('data-wf-node'), n.closest('.react-flow__node').style.transform]).sort()) === ${JSON.stringify(tidy)}`)
+
+      // duplicate button, then Ctrl+C / Ctrl+V of the selection
+      await settle()
+      await click('duplicate')
+      await waitFor('duplicate', `document.querySelectorAll('[data-wf-node]').length === 6`)
+      await settle()
+      await press('c')
+      await press('v')
+      await waitFor('paste', `document.querySelectorAll('[data-wf-node]').length === 7`)
+      const ids = await js<string[]>(`[...document.querySelectorAll('[data-wf-node]')].map((n) => n.getAttribute('data-wf-node'))`)
+      if (new Set(ids).size !== 7) throw new Error(`step ids are not unique: ${ids.join(', ')}`)
+      await shot('60-workflow-tidy-and-paste.png')
+
+      // Ctrl+Z walks back: paste, duplicate, tidy, add
+      for (const n of [6, 5]) {
+        await press('z')
+        await waitFor(`undo to ${n}`, `document.querySelectorAll('[data-wf-node]').length === ${n}`)
+      }
+      await press('z') // tidy
+      await waitFor('undo the tidy', `JSON.stringify([...document.querySelectorAll('[data-wf-node]')].map((n) => [n.getAttribute('data-wf-node'), n.closest('.react-flow__node').style.transform]).sort()) === ${JSON.stringify(beforeTidy)}`)
+      await press('z')
+      await waitFor('undo the add', `document.querySelectorAll('[data-wf-node]').length === 4`)
+      await press('z', 'shiftKey: true,') // Ctrl+Shift+Z redoes the add
+      await waitFor('redo the add', `document.querySelectorAll('[data-wf-node]').length === 5`)
+      await press('z')
+      await waitFor('back to four', `document.querySelectorAll('[data-wf-node]').length === 4`)
+      return 'tidy moved the steps, undo/redo restored them, duplicate and Ctrl+C/Ctrl+V pasted copies with unique ids, Ctrl+Z walked back to the original'
+    })
+
     await step('ui_workflow_save_persists_graph_and_name', async () => {
       await setNative('[data-wf-name]', 'Smoke review loop v2')
       await js(`document.querySelector('[data-wf-action="save"]').click()`)
@@ -1276,6 +1331,225 @@ export async function runSmokeTest(opts: {
       const s2 = await wfState(done.id)
       if (done.id !== stopped.id || wfNode(s2, 'slow')?.status !== 'done' || wfNode(s2, 'wrap')?.status !== 'done') throw new Error(`after resume: ${JSON.stringify(s2.nodes.map((n) => [n.nodeId, n.status]))}`)
       return `stopped (${stopped.status}) with “Wrap up” untouched; Resume finished the same run`
+    })
+
+    // ------------------------------------------------------------------ Phase 9: git, checkpoints, build/test automation, live preview, Auto Recovery
+    const pid = JSON.stringify(smokeProject.id)
+    const gitStatus = () => js<{ isRepo: boolean; hasCommits: boolean; files: Array<{ path: string }> }>(`window.api.invoke('git:status', ${pid})`)
+    await step('ui_source_control_lists_changes_and_commits', async () => {
+      await wsWrite('package.json', JSON.stringify({ name: 'smoke-game', version: '1.0.0', scripts: { build: `node -e "console.error('src/main.js(3,5): error TS2322: smoke build failure'); process.exit(1)"`, test: 'node --test' } }, null, 2))
+      await wsWrite('tests/sample.test.js', "const { test } = require('node:test')\nconst assert = require('node:assert')\ntest('adds', () => assert.strictEqual(1 + 1, 2))\ntest('upper', () => assert.strictEqual('a'.toUpperCase(), 'A'))\n")
+      await js(`document.querySelector('[data-nav="source"]').click()`)
+      await waitFor('source control page', `!!document.querySelector('[data-page="source"]')`, 15000)
+      await setNative('[data-page="source"] select[aria-label="Project"]', smokeProject.id)
+      await waitFor('changed files', `!!document.querySelector('[data-git-file="README.md"]') && !!document.querySelector('[data-git-file="package.json"]')`, 15000)
+      await shot('52-source-control-changes.png')
+      await js(`document.querySelector('input[aria-label="Select all changed files"]').click()`)
+      await setNative('[data-commit-message]', 'Smoke: first commit')
+      await waitFor('commit enabled', `!document.querySelector('[data-commit]').disabled`)
+      await js(`document.querySelector('[data-commit]').click()`)
+      await waitFor('empty change list', `!document.querySelector('[data-git-file]')`, 15000)
+      const log = await js<Array<{ subject: string }>>(`window.api.invoke('git:log', { projectId: ${pid}, limit: 5 })`)
+      if (!log.some((c) => c.subject === 'Smoke: first commit')) throw new Error(`commit missing from the log: ${JSON.stringify(log)}`)
+      if ((await gitStatus()).files.length !== 0) throw new Error('files still reported as changed after the commit')
+      return 'changes listed, selected, committed; the repository log has the commit'
+    })
+
+    await step('ui_checkpoint_create_and_restore', async () => {
+      const before = (await wsRead('README.md')).content
+      await setNative('input[aria-label="Checkpoint name"]', 'Smoke checkpoint')
+      await js(`document.querySelector('[data-checkpoint-create]').click()`)
+      await waitFor('manual checkpoint', `!!document.querySelector('[data-checkpoint="manual"]')`, 15000)
+      await wsWrite('README.md', 'OVERWRITTEN AFTER THE CHECKPOINT\n')
+      await wsWrite('extra-after-checkpoint.txt', 'new file\n')
+      await js(`document.querySelector('[data-checkpoint="manual"] [data-checkpoint-restore]').click()`)
+      await waitFor('confirm step', `!!document.querySelector('[data-checkpoint-confirm]')`)
+      await shot('53-checkpoint-confirm.png')
+      await js(`document.querySelector('[data-checkpoint-confirm]').click()`)
+      await waitFor('safety checkpoint', `!!document.querySelector('[data-checkpoint="safety"]')`, 15000)
+      const after = (await wsRead('README.md')).content
+      if (after !== before) throw new Error(`README not restored: ${JSON.stringify(after.slice(0, 60))}`)
+      const gone = await js<boolean>(`window.api.invoke('fs:read', { projectId: ${pid}, path: 'extra-after-checkpoint.txt' }).then(() => false, () => true)`)
+      if (!gone) throw new Error('a file created after the checkpoint survived the restore')
+      await shot('54-source-control-checkpoints.png')
+      return 'restore put README back, removed the later file and kept a safety checkpoint of the state it replaced'
+    })
+
+    await step('ui_build_failure_fills_output_and_problems', async () => {
+      await js(`document.querySelector('[data-nav="workspace"]').click()`)
+      await waitFor('workspace page', `!!document.querySelector('[data-page="workspace"]')`, 15000)
+      await js(`[...document.querySelectorAll('[aria-label="Output panel"] [role="tab"]')].find(b => b.textContent.includes('Build Output')).click()`)
+      await waitFor('build button', `!!document.querySelector('[data-run-kind="build"]')`, 15000)
+      await js(`document.querySelector('[data-run-kind="build"]').click()`)
+      await waitFor('failed build', `!!document.querySelector('[data-run-status="failed"]')`, 60000)
+      const out = await js<string>(`document.querySelector('[data-build-output]').innerText`)
+      if (!out.includes('smoke build failure')) throw new Error(`build output: ${out.slice(0, 200)}`)
+      await shot('55-build-output.png')
+      await js(`[...document.querySelectorAll('[aria-label="Output panel"] [role="tab"]')].find(b => b.textContent.includes('Problems')).click()`)
+      await waitFor('parsed problem', `!!document.querySelector('[data-problem="error"]')`, 8000)
+      const text = await js<string>(`document.querySelector('[data-problems]').innerText`)
+      if (!text.includes('smoke build failure') || !text.includes('src/main.js')) throw new Error(`problems: ${text.slice(0, 200)}`)
+      const count = await js<number>(`document.querySelectorAll('[data-problem]').length`)
+      if (count !== 1) throw new Error(`expected exactly one problem (npm's echo of the script line must not count), got ${count}: ${text.slice(0, 300)}`)
+      await shot('56-problems.png')
+      return 'a failing build streamed its output and the error was parsed into the Problems tab'
+    })
+
+    await step('ui_test_run_shows_pass_counts', async () => {
+      await js(`[...document.querySelectorAll('[aria-label="Output panel"] [role="tab"]')].find(b => b.textContent.includes('Test Results')).click()`)
+      await js(`document.querySelector('[data-run-kind="test"]').click()`)
+      await waitFor('passed count', `(document.querySelector('[data-tests-passed]')?.innerText ?? '').includes('2')`, 60000).catch(async (e) => {
+        await shot('57-test-results-failed.png')
+        throw new Error(`${e.message}; panel shows: ${(await js<string>(`document.querySelector('[aria-label="Output panel"]').innerText`)).slice(0, 400)}`)
+      })
+      const failed = await js<string>(`document.querySelector('[data-tests-failed]')?.innerText ?? ''`)
+      await shot('57-test-results.png')
+      return `node --test: ${await js<string>(`document.querySelector('[data-tests-passed]').innerText`)}; ${failed}`
+    })
+
+    await step('ui_live_preview_serves_the_project_and_stops', async () => {
+      await wsWrite('site/index.html', '<!doctype html><title>Smoke preview</title><h1 id="hi">Hello from the preview</h1>\n')
+      await js(`document.querySelector('[data-nav="preview"]').click()`)
+      await waitFor('preview page', `!!document.querySelector('[data-page="preview"]')`, 15000)
+      await setNative('[data-page="preview"] select[aria-label="Project"]', smokeProject.id)
+      await waitFor('folder option', `!![...document.querySelectorAll('select[aria-label="Folder"] option')].find(o => o.value === 'site')`, 10000)
+      await setNative('select[aria-label="Folder"]', 'site')
+      await js(`document.querySelector('[data-preview-start]').click()`)
+      await waitFor('preview url', `/^http:\\/\\/127\\.0\\.0\\.1:\\d+/.test(document.querySelector('[data-preview-url]')?.innerText ?? '')`, 20000)
+      const url = (await js<string>(`document.querySelector('[data-preview-url]').innerText`)).trim()
+      await waitFor('frame', `document.querySelector('[data-preview-frame]')?.getAttribute('src')?.startsWith('http://127.0.0.1:')`, 8000)
+      const served = await (await fetch(url)).text()
+      if (!served.includes('Hello from the preview')) throw new Error(`served: ${served.slice(0, 120)}`)
+      // fetch() will not let a caller set Host, so speak raw HTTP for the anti-DNS-rebinding check.
+      const evil = await new Promise<number>((resolve) => {
+        const u = new URL(url)
+        const rq = httpRequest({ host: u.hostname, port: u.port, path: '/', headers: { host: 'evil.example' } }, (res) => {
+          res.resume()
+          resolve(res.statusCode ?? 0)
+        })
+        rq.on('error', () => resolve(0))
+        rq.end()
+      })
+      if (evil !== 403) throw new Error(`a foreign Host header got status ${evil}, expected 403`)
+      await shot('58-live-preview.png')
+      await js(`document.querySelector('[data-preview-stop]').click()`)
+      await waitFor('stopped', `!document.querySelector('[data-preview-stop]')`, 10000)
+      const alive = await fetch(url).then(() => true, () => false)
+      if (alive) throw new Error('the preview server kept running after Stop')
+      return `static server on ${url} served the page, refused a foreign Host header, and stopped`
+    })
+
+    await step('ui_auto_recovery_toggle_saves', async () => {
+      await js(`document.querySelector('[data-nav="projects"]').click()`)
+      await waitFor('project card', `!!document.querySelector('[data-project-card=${pid}]')`, 8000)
+      await js(`document.querySelector('[data-project-card=${pid}]').click()`)
+      await waitFor('toggle', `!!document.querySelector('[data-auto-recovery]')`, 8000)
+      if (await js<boolean>(`document.querySelector('[data-auto-recovery]').checked`)) throw new Error('Auto Recovery should default to off')
+      await js(`document.querySelector('[data-auto-recovery]').click()`)
+      await clickText('Save changes')
+      await waitFor('saved', `/Saved/.test(document.body.innerText)`, 8000)
+      const p = await js<{ autoRecovery: boolean }>(`window.api.invoke('projects:list').then(l => l.find(x => x.id === ${pid}))`)
+      if (!p.autoRecovery) throw new Error('setting not stored')
+      await shot('59-auto-recovery-setting.png')
+      await js(`window.api.invoke('projects:update', { id: ${pid}, autoRecovery: false })`)
+      return 'off by default; the checkbox saves through projects:update'
+    })
+
+    // ------------------------------------------------------------------ Phase 10 catch-up: external edits, import, per-agent usage, archive
+
+    await step('ui_external_edit_shows_in_tree_and_reloads_open_file', async () => {
+      await js(`document.querySelector('[data-nav="workspace"]').click()`)
+      await waitFor('workspace page', `!!document.querySelector('[data-page="workspace"]')`, 15000)
+      await setNative('select[aria-label="Project"]', smokeProject.id)
+      await wait(600) // the folder watcher follows the project on screen
+      // written by this process directly, not through the app's file service: this is exactly what another program's edit looks like
+      writeFileSync(join(projectRoot, 'ext-edit.txt'), 'first version written outside the app\n')
+      await waitFor('new file in the tree without a refresh', `!!document.querySelector('[data-path="ext-edit.txt"]')`, 10000)
+      await js(`document.querySelector('[data-path="ext-edit.txt"]').click()`)
+      await waitFor('its text', `(document.querySelector('[data-editor-host] .view-lines')?.innerText ?? '').replace(/\\u00a0/g, ' ').includes('first version')`, 10000)
+      writeFileSync(join(projectRoot, 'ext-edit.txt'), 'second version written outside the app\n')
+      await waitFor('open editor reloaded', `(document.querySelector('[data-editor-host] .view-lines')?.innerText ?? '').replace(/\\u00a0/g, ' ').includes('second version')`, 10000)
+      await shot('61-external-edit-reloaded.png')
+      rmSync(join(projectRoot, 'ext-edit.txt'))
+      await waitFor('removed file leaves the tree', `!document.querySelector('[data-path="ext-edit.txt"]')`, 10000)
+      return 'a file created, edited and deleted by another program appeared in the tree, reloaded in the open editor and disappeared, with no Refresh'
+    })
+
+    await step('ui_assets_import_existing_pictures', async () => {
+      const img = newRaster(16, 16)
+      for (let i = 0; i < img.data.length; i += 4) img.data.set([40, 160, 90, 255], i)
+      const png = encodePng(img)
+      mkdirSync(join(projectRoot, 'art', 'hand-made'), { recursive: true })
+      writeFileSync(join(projectRoot, 'art', 'hand-made', 'tree-sprite.png'), png)
+      writeFileSync(join(projectRoot, 'art', 'hand-made', 'notes.txt'), 'not a picture')
+      writeFileSync(join(projectRoot, 'art', 'hand-made', 'fake.png'), 'text pretending to be a picture')
+      await js(`document.querySelector('[data-nav="assets"]').click()`)
+      await waitFor('assets page', `!!document.querySelector('[data-action="open-import"]')`, 15000)
+      await setNative('select[aria-label="Project"]', smokeProject.id)
+      await js(`document.querySelector('[data-action="open-import"]').click()`)
+      await waitFor('import list', `!!document.querySelector('[data-import-list]')`, 15000)
+      const listed = await js<string[]>(`[...document.querySelectorAll('[data-import-file]')].map((c) => c.getAttribute('data-import-file'))`)
+      if (!listed.includes('art/hand-made/tree-sprite.png')) throw new Error(`the picture is not offered: ${listed.join(', ')}`)
+      if (listed.some((p) => p.endsWith('notes.txt'))) throw new Error('a text file was offered for import')
+      await shot('62-import-existing.png')
+      await js(`document.querySelector('[data-action="import-confirm"]').click()`)
+      // the text file posing as a PNG is offered (by extension) but refused once its content is read
+      await waitFor('refusal listed', `!!document.querySelector('[data-import-skipped]')`, 15000)
+      const why = await js<string>(`document.querySelector('[data-import-skipped]').innerText`)
+      if (!/fake\.png/.test(why)) throw new Error(`skip list: ${why}`)
+      if (/tree-sprite/.test(why)) throw new Error(`the real picture was refused: ${why}`)
+      const assets = await js<Array<Record<string, any>>>(`window.api.invoke('assets:list', { projectId: ${JSON.stringify(smokeProject.id)} })`)
+      const mine = assets.find((a) => a.path === 'art/hand-made/tree-sprite.png')
+      if (!mine || mine.origin !== 'imported' || mine.width !== 16) throw new Error(`imported asset: ${JSON.stringify(mine)}`)
+      if (readFileSync(join(projectRoot, 'art', 'hand-made', 'tree-sprite.png')).length !== png.length) throw new Error('the picture file was changed by the import')
+      await clickText('Close')
+      await waitFor('imported card', `!!document.querySelector('[data-asset="tree-sprite.png"]')`, 10000)
+      await shot('63-imported-asset.png')
+      return `the hand-made picture was offered and imported without touching the file (16x16, origin imported); the fake PNG was refused: ${why.replace(/\s+/g, ' ').slice(0, 120)}`
+    })
+
+    await step('ui_usage_tab_lists_spend_per_agent', async () => {
+      await js(`[...document.querySelectorAll('[aria-label="Agent activity"] [role="tab"]')].find((b) => b.textContent.includes('Usage')).click()`)
+      await waitFor('by-agent list', `!!document.querySelector('[data-usage-by-agent] [data-agent-usage]')`, 10000)
+      const rows = await js<string[]>(`[...document.querySelectorAll('[data-agent-usage]')].map((r) => r.getAttribute('data-agent-usage'))`)
+      const api = await js<Array<{ agentName: string; calls: number }>>(`window.api.invoke('usage:byAgent', {})`)
+      if (api.length === 0) throw new Error('no agent usage recorded although runs were made')
+      if (rows.length !== api.length) throw new Error(`list shows ${rows.length} rows, the API returned ${api.length}`)
+      await shot('64-usage-by-agent.png')
+      return `${rows.length} usage row(s): ${rows.slice(0, 3).join(', ')}`
+    })
+
+    await step('ui_chat_tab_shows_team_messages', async () => {
+      await js(`[...document.querySelectorAll('[aria-label="Agent activity"] [role="tab"]')].find((b) => b.textContent.includes('Chat')).click()`)
+      await waitFor('team feed', `!!document.querySelector('[data-team-chat] [data-team-message]')`, 10000)
+      const shown = await js<number>(`document.querySelectorAll('[data-team-message]').length`)
+      const api = await js<Array<{ kind: string; content: string }>>(`window.api.invoke('tasks:team', { limit: 40 })`)
+      if (shown !== api.length) throw new Error(`feed shows ${shown}, the API returned ${api.length}`)
+      const text = await js<string>(`document.querySelector('[data-team-chat]').innerText`)
+      if (/Authorization|sk-smoke/.test(text)) throw new Error('a secret appears in the team feed')
+      await shot('66-team-chat.png')
+      return `${shown} message(s) in the feed, newest first; ${api.filter((m) => m.kind === 'change-request').length} change request(s)`
+    })
+
+    await step('ui_archive_project_hides_it_and_restore_brings_it_back', async () => {
+      await js(`document.querySelector('[data-nav="projects"]').click()`)
+      await waitFor('project card', `!!document.querySelector('[data-project-card=${pid}]')`, 8000)
+      await js(`document.querySelector('[data-project-card=${pid}]').click()`)
+      await waitFor('archive button', `!!document.querySelector('[data-archive-toggle]')`, 8000)
+      await js(`document.querySelector('[data-archive-toggle]').click()`)
+      await waitFor('back on the list with an archived section', `!!document.querySelector('[data-archived-section]')`, 8000)
+      if (await js<boolean>(`!!document.querySelector('[data-project-card=${pid}]')`)) throw new Error('the archived project is still in the main list')
+      const statusOf = async () => (await js<Array<{ id: string; status: string }>>(`window.api.invoke('projects:list')`)).find((p) => p.id === smokeProject.id)?.status
+      if ((await statusOf()) !== 'archived') throw new Error(`stored status: ${await statusOf()}`)
+      await js(`document.querySelector('[data-archived-toggle]').click()`)
+      await waitFor('archived card shown', `!!document.querySelector('[data-archived-section] [data-project-card=${pid}]')`, 8000)
+      await shot('65-archived-projects.png')
+      await js(`document.querySelector('[data-archived-section] [data-project-card=${pid}]').click()`)
+      await waitFor('restore button', `!!document.querySelector('[data-archive-toggle]')`, 8000)
+      await js(`document.querySelector('[data-archive-toggle]').click()`)
+      await waitFor('restored', `document.querySelector('[data-archive-toggle]')?.textContent.includes('Archive project')`, 8000)
+      if ((await statusOf()) === 'archived') throw new Error('still archived after Restore')
+      return 'archiving moved the project to the collapsed archived section (data kept); Restore made it active again'
     })
 
     await step('wrong_key_reports_error_and_redacts_it', async () => {

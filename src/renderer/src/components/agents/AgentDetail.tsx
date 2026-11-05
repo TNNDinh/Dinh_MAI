@@ -25,6 +25,7 @@ const COMMAND_POLICIES: Array<[CommandPolicy, string]> = [
 
 interface Draft {
   name: string
+  role: string
   connectionId: string
   model: string
   systemPrompt: string
@@ -36,6 +37,7 @@ interface Draft {
 
 const toDraft = (a: Agent): Draft => ({
   name: a.name,
+  role: a.role,
   connectionId: a.connectionId ?? '',
   model: a.model ?? '',
   systemPrompt: a.systemPrompt,
@@ -50,6 +52,7 @@ const num = (s: string): number | null => (s.trim() === '' ? null : Number(s))
 
 function ConfigTab({ agent, onRemoved }: { agent: Agent; onRemoved: () => void }) {
   const refresh = useStudio((s) => s.refresh)
+  const templates = useStudio((s) => s.agentTemplates)
   const allConnections = useStudio((s) => s.connections)
   const catalog = useStudio((s) => s.catalog)
   const isImage = agent.kind === 'image'
@@ -97,6 +100,7 @@ function ConfigTab({ agent, onRemoved }: { agent: Agent; onRemoved: () => void }
       await window.api.invoke('agents:update', {
         id: agent.id,
         name: draft.name,
+        role: draft.role,
         connectionId: draft.connectionId || null,
         model: draft.model.trim() || null,
         systemPrompt: draft.systemPrompt,
@@ -133,8 +137,17 @@ function ConfigTab({ agent, onRemoved }: { agent: Agent; onRemoved: () => void }
         <Field label="Name">
           <Input value={draft.name} maxLength={80} onChange={(e) => patch({ name: e.target.value })} aria-label="Agent name" />
         </Field>
-        <Field label="Role" hint="Fixed when the agent is created. Duplicate it to start a variation.">
-          <Input value={agent.roleLabel} disabled aria-label="Role" />
+        <Field label="Role" hint="The orchestrator hands tasks to agents by role. Changing it does not change the prompt or permissions below.">
+          <Select value={draft.role} onChange={(e) => patch({ role: e.target.value })} aria-label="Role">
+            {templates
+              .filter((t) => t.kind === agent.kind)
+              .map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.label}
+                </option>
+              ))}
+            <option value="custom">Custom</option>
+          </Select>
         </Field>
       </div>
 

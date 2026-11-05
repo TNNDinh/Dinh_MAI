@@ -25,6 +25,7 @@ interface ProjectRow {
   progress: number
   budget_usd: number | null
   max_iterations: number
+  auto_recovery: number
   created_at: number
   updated_at: number
 }
@@ -39,6 +40,7 @@ const toProject = (r: ProjectRow): Project => ({
   progress: r.progress,
   budgetUsd: r.budget_usd,
   maxIterations: r.max_iterations,
+  autoRecovery: r.auto_recovery === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at
 })
@@ -166,20 +168,26 @@ export class ProjectService {
     if (!VALID_STATUS.has(status)) throw new Error(`Unknown status "${status}".`)
     const budgetUsd = input.budgetUsd !== undefined ? validateBudget(input.budgetUsd) : current.budgetUsd
     const maxIterations = input.maxIterations !== undefined ? validateIterations(input.maxIterations) : current.maxIterations
+    if (input.autoRecovery !== undefined && typeof input.autoRecovery !== 'boolean') throw new Error('Auto Recovery must be on or off.')
+    const autoRecovery = input.autoRecovery ?? current.autoRecovery
 
     this.db.run(
-      `UPDATE projects SET name=?, type=?, goal=?, status=?, budget_usd=?, max_iterations=?, updated_at=? WHERE id=?`,
+      `UPDATE projects SET name=?, type=?, goal=?, status=?, budget_usd=?, max_iterations=?, auto_recovery=?, updated_at=? WHERE id=?`,
       name,
       type,
       (input.goal ?? current.goal).trim(),
       status,
       budgetUsd,
       maxIterations,
+      autoRecovery ? 1 : 0,
       Date.now(),
       input.id
     )
     if (status !== current.status) {
       this.events.record({ projectId: input.id, type: 'project.status', message: `Project "${name}" marked ${status}` })
+    }
+    if (autoRecovery !== current.autoRecovery) {
+      this.events.record({ projectId: input.id, type: 'project.auto_recovery', message: `Auto Recovery ${autoRecovery ? 'turned on' : 'turned off'} for "${name}"` })
     }
     return this.get(input.id)!
   }

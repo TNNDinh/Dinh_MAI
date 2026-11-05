@@ -4,14 +4,15 @@ import { fmtTime } from '../lib/format'
 import { EmptyState, cx } from './ui'
 import { LEVEL_COLOR } from './RightPanel'
 import { Terminal } from './Terminal'
+import { AutomationToolbar, BuildOutputView, ProblemsView, TestResultsView, useProblemCount } from './AutomationPanel'
 import type { EventLevel } from '../../../shared/ipc'
 
-const TABS: Array<{ id: BottomTab; label: string; phase?: number }> = [
+const TABS: Array<{ id: BottomTab; label: string }> = [
   { id: 'logs', label: 'Logs' },
   { id: 'terminal', label: 'Terminal' },
-  { id: 'build', label: 'Build Output', phase: 9 },
-  { id: 'problems', label: 'Problems', phase: 9 },
-  { id: 'tests', label: 'Test Results', phase: 9 }
+  { id: 'build', label: 'Build Output' },
+  { id: 'problems', label: 'Problems' },
+  { id: 'tests', label: 'Test Results' }
 ]
 
 const LEVELS: EventLevel[] = ['debug', 'info', 'warn', 'error']
@@ -19,7 +20,7 @@ const LEVELS: EventLevel[] = ['debug', 'info', 'warn', 'error']
 export function BottomPanel() {
   const { bottomTab, setBottomTab, events } = useStudio()
   const [min, setMin] = useState<EventLevel>('info')
-  const tab = TABS.find((t) => t.id === bottomTab)!
+  const problems = useProblemCount()
   const shown = events.filter((e) => LEVELS.indexOf(e.level) >= LEVELS.indexOf(min))
 
   return (
@@ -38,9 +39,15 @@ export function BottomPanel() {
               )}
             >
               {t.label}
+              {t.id === 'problems' && problems > 0 && (
+                <span className="ml-1 rounded bg-err/20 px-1 text-[10px] text-err" data-problem-count>
+                  {problems}
+                </span>
+              )}
             </button>
           ))}
         </div>
+        {(bottomTab === 'build' || bottomTab === 'problems' || bottomTab === 'tests') && <AutomationToolbar />}
         {bottomTab === 'logs' && (
           <label className="flex items-center gap-1.5 text-[11px] text-faint">
             Level
@@ -77,10 +84,12 @@ export function BottomPanel() {
               ))}
             </ul>
           )
+        ) : bottomTab === 'build' ? (
+          <BuildOutputView />
+        ) : bottomTab === 'problems' ? (
+          <ProblemsView />
         ) : (
-          <EmptyState title={`${tab.label} is not available yet`}>
-            {`Planned for Phase ${tab.phase}. No fake output is shown in the meantime.`}
-          </EmptyState>
+          <TestResultsView />
         )}
       </div>
     </section>

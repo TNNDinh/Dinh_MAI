@@ -2,10 +2,14 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { statSync } from 'node:fs'
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeImage, safeStorage, shell } from 'electron'
-import { ACTIVITY_CHANNEL, APPROVAL_CHANNEL, CHAT_CHANNEL, FS_CHANNEL, TERMINAL_CHANNEL, type AppInfo, type ChatStreamEvent } from '../shared/ipc'
+import { ACTIVITY_CHANNEL, APPROVAL_CHANNEL, AUTOMATION_CHANNEL, CHAT_CHANNEL, FS_CHANNEL, PREVIEW_CHANNEL, TERMINAL_CHANNEL, type AppInfo, type ChatStreamEvent } from '../shared/ipc'
 import { AssetService } from './assets/service'
 import { bgraToRaster, setForeignDecoder } from './assets/codec'
 import { Database } from './db/database'
+import { AutomationService } from './automation/service'
+import { AutoRecovery } from './git/recovery'
+import { GitService } from './git/service'
+import { PreviewService } from './preview/service'
 import { createHandlers } from './ipc/handlers'
 import { registerIpc, type IpcMainLike } from './ipc/register'
 import { EncryptedFileSecretStore, type Cipher } from './secrets/secret-store'
@@ -30,6 +34,8 @@ const dataOverride = process.env.MADS_USER_DATA
 if (dataOverride) app.setPath('userData', dataOverride)
 
 const smokeDir = process.env.MADS_SMOKE
+// The self test drives the UI while other windows may cover it; Chromium stops painting an occluded window, which starves Monaco and the workflow canvas.
+if (smokeDir) app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL
 
 if (!smokeDir && !app.requestSingleInstanceLock()) {
@@ -74,6 +80,9 @@ async function bootstrap(): Promise<void> {
   const locks = new FileLocks(db)
   const commands = new CommandService(db, events, new ApprovalService())
   const workspace = new WorkspaceService(db, events, locks, new ContextIndexer(db))
+  const git = new GitService(db, events, workspace)
+  const automation = new AutomationService(events, workspace, commands)
+  const preview = new PreviewService(events, workspace)
   const assets = new AssetService({ db, events, workspace, connections })
   // JPEG, WebP, GIF and interlaced PNG are decoded by Electron; PNG uses the built-in decoder.
   setForeignDecoder((data) => {
@@ -82,7 +91,7 @@ async function bootstrap(): Promise<void> {
     const { width, height } = img.getSize()
     return bgraToRaster(img.toBitmap(), width, height, true)
   })
-  const orchestrator = new Orchestrator(db, events, agents, chat, tasks, { workspace, commands, assets })
+  const orchestrator = new Orchestrator(db, events, agents, chat, tasks, { workspace, commands, assets, recovery: new AutoRecovery(db, events, git, workspace) })
   // No task can still be running after a restart, so every file lock left in the database is stale.
   locks.clearAll()
   // A run cannot survive a restart: pause what was interrupted so the UI never shows a ghost "running" run.
@@ -125,7 +134,7 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  registerIpc(ipcMain as unknown as IpcMainLike, createHandlers({ projects, dashboard, events, connections, chat, agents, tasks, orchestrator, workspace, commands, assets, workflows, workflowEngine, host }), {
+  registerIpc(ipcMain as unknown as IpcMainLike, createHandlers({ projects, dashboard, events, connections, chat, agents, tasks, orchestrator, workspace, commands, assets, workflows, workflowEngine, git, automation, preview, host }), {
     isTrustedSender: isTrustedUrl,
     onError: (channel, error) =>
       events.record({ level: 'error', type: 'ipc.error', message: `${channel}: ${error instanceof Error ? error.message : String(error)}` })
@@ -142,6 +151,8 @@ async function bootstrap(): Promise<void> {
   commands.subscribe((e) => broadcast(TERMINAL_CHANNEL, e))
   commands.approvals.subscribe((list) => broadcast(APPROVAL_CHANNEL, list))
   workspace.onChange((c) => broadcast(FS_CHANNEL, c))
+  automation.subscribe((r) => broadcast(AUTOMATION_CHANNEL, r))
+  preview.subscribe((i) => broadcast(PREVIEW_CHANNEL, i))
 
   events.record({ type: 'app.started', message: `Multi-AI Development Studio ${app.getVersion()} started` })
   if (!encryptionAvailable) {
@@ -164,6 +175,8 @@ async function bootstrap(): Promise<void> {
   app.on('before-quit', () => {
     chat.cancelAll()
     commands.killAll()
+    workspace.stopWatching()
+    void preview.dispose()
     void workflowEngine.stopAll()
     void orchestrator.stopAll()
     db.close()

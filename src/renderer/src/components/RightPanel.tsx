@@ -4,7 +4,7 @@ import { useStudio, type RightTab } from '../store'
 import { fmtInt, fmtTime, fmtTokens, fmtUsd } from '../lib/format'
 import { EmptyState, cx } from './ui'
 import { TASK_STATUS_DOT, TASK_STATUS_LABEL } from './tasks/meta'
-import type { ActivityEvent, EventLevel, ModelUsageRow, UsageTotals } from '../../../shared/ipc'
+import type { ActivityEvent, AgentUsageRow, EventLevel, ModelUsageRow, TeamMessage, UsageTotals } from '../../../shared/ipc'
 
 const TABS: Array<{ id: RightTab; label: string; icon: typeof Activity }> = [
   { id: 'activity', label: 'Activity', icon: Activity },
@@ -91,6 +91,91 @@ function ModelUsageList({ refreshKey }: { refreshKey: number }) {
   )
 }
 
+function AgentUsageList({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<AgentUsageRow[] | null>(null)
+  useEffect(() => {
+    void window.api.invoke('usage:byAgent', {}).then(setRows, () => setRows([]))
+  }, [refreshKey])
+
+  if (!rows || rows.length === 0) return null
+  return (
+    <div className="rounded-lg border border-line bg-panel">
+      <div className="border-b border-line px-3 py-2 text-xs font-medium text-muted">By agent</div>
+      <ul className="divide-y divide-line/60" data-usage-by-agent>
+        {rows.map((r) => (
+          <li key={r.agentId ?? 'none'} className="px-3 py-2 text-xs" data-agent-usage={r.agentName}>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="min-w-0 truncate text-[12px]" title={r.agentName}>
+                {r.agentName}
+              </span>
+              <span className="shrink-0 tabular-nums">
+                {r.unpricedCalls > 0 ? (r.costUsd > 0 ? `≥ ${fmtUsd(r.costUsd)}` : 'cost unknown') : fmtUsd(r.costUsd)}
+              </span>
+            </div>
+            <div className="mt-0.5 flex justify-between gap-2 text-[11px] text-faint">
+              <span className="truncate">{r.role ?? ''}</span>
+              <span className="shrink-0 tabular-nums">
+                {fmtInt(r.calls)} call{r.calls === 1 ? '' : 's'} · {fmtTokens(r.inputTokens)} in · {fmtTokens(r.outputTokens)} out
+                {r.failedCalls > 0 ? ` · ${r.failedCalls} failed` : ''}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** What the agents said to each other and to the user, across tasks. Built from the per-task logs; the full text is in the task drawer. */
+function TeamChat({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<TeamMessage[] | null>(null)
+  const tasks = useStudio((st) => st.tasks)
+  const openTask = useStudio((st) => st.openTask)
+  const setPage = useStudio((st) => st.setPage)
+  useEffect(() => {
+    void window.api.invoke('tasks:team', { limit: 40 }).then(setRows, () => setRows([]))
+  }, [refreshKey])
+
+  if (rows === null) return <p className="p-3 text-xs text-faint">Loading…</p>
+  if (rows.length === 0) {
+    return (
+      <EmptyState icon={<MessagesSquare size={20} />} title="No agent messages yet">
+        When agents work on tasks, their replies and the change requests they send each other appear here, newest first.
+      </EmptyState>
+    )
+  }
+  return (
+    <ul className="divide-y divide-line/60" data-team-chat>
+      {rows.map((m) => (
+        <li key={m.id} className="px-3 py-2" data-team-message={m.kind}>
+          <div className="flex items-baseline justify-between gap-2 text-[11px]">
+            <span className="min-w-0 truncate font-medium text-fg">
+              {m.agentName ?? 'An agent'}
+              {m.kind === 'change-request' && <span className="ml-1.5 rounded bg-warn/15 px-1 py-px text-[10px] font-normal text-warn">change request</span>}
+            </span>
+            <span className="shrink-0 text-faint">{fmtTime(m.createdAt)}</span>
+          </div>
+          <p className="mt-1 line-clamp-6 text-[12px] leading-snug break-words whitespace-pre-wrap text-muted" data-selectable>
+            {m.content}
+          </p>
+          {m.taskTitle && (
+            <button
+              className="mt-1 max-w-full truncate text-[11px] text-accent hover:underline"
+              onClick={() => {
+                const t = tasks.find((x) => x.id === m.taskId)
+                if (t) openTask(t)
+                else setPage('tasks')
+              }}
+            >
+              on “{m.taskTitle}”
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export function RightPanel() {
   const { rightTab, setRightTab, events, stats, tasks, openTask, setPage } = useStudio()
   const ORDER = { in_progress: 0, review: 1, testing: 1, todo: 2, blocked: 3, failed: 4, done: 5 } as const
@@ -130,19 +215,7 @@ export function RightPanel() {
             </ul>
           ))}
 
-        {rightTab === 'chat' && (
-          <EmptyState
-            icon={<MessagesSquare size={20} />}
-            title="Agent conversations"
-            action={
-              <button onClick={() => setPage('tasks')} className="text-xs text-accent hover:underline">
-                Open the Task Manager
-              </button>
-            }
-          >
-            Every task keeps its own log of the prompts, replies and tool calls between an agent and its model: open a task to read it. A shared team chat room is not built yet.
-          </EmptyState>
-        )}
+        {rightTab === 'chat' && <TeamChat refreshKey={events[0]?.id ?? 0} />}
 
         {rightTab === 'tasks' && (
           <div className="space-y-3 p-3">
@@ -183,6 +256,7 @@ export function RightPanel() {
               <>
                 <UsageBlock title="Today" u={stats.usage.today} />
                 <UsageBlock title="All time" u={stats.usage.total} />
+                <AgentUsageList refreshKey={stats.usage.total.callCount} />
                 <ModelUsageList refreshKey={stats.usage.total.callCount} />
               </>
             ) : (

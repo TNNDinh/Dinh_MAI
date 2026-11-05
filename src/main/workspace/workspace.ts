@@ -2,8 +2,10 @@ import type { Agent, DirListing, FileContent, FileLockInfo, FsChange, IndexSumma
 import type { Database } from '../db/database'
 import type { EventService } from '../services/events'
 import { ContextIndexer } from './indexer'
+import { TaskJournal, type RollbackResult } from './journal'
 import { FileLockedError, FileLocks } from './locks'
 import { Sandbox, WorkspaceError, isSecretPath, normalizeRel } from './sandbox'
+import { FolderWatcher } from './watcher'
 
 interface ProjectRow {
   id: string
@@ -23,6 +25,8 @@ export interface Actor {
  * what changed. The user and agents go through the same sandbox; the differences are the lock check (the user
  * cannot overwrite a file an agent is editing) and that agents may not read credential files.
  */
+const OWN_WINDOW_MS = 2500
+
 export class WorkspaceService {
   private readonly sandboxes = new Map<string, Sandbox>()
   private readonly changeListeners = new Set<(c: FsChange) => void>()
@@ -40,12 +44,87 @@ export class WorkspaceService {
   }
 
   private emit(c: FsChange): void {
+    if (c.by !== 'external') this.noteOwn(c.projectId, c.path)
     for (const l of this.changeListeners) l(c)
+  }
+
+  // ------------------------------------------------------------------ changes made by other programs
+
+  private watcher: { projectId: string; w: FolderWatcher } | null = null
+  /** Paths this app changed a moment ago: the folder watcher sees those too and must not report them as foreign edits. */
+  private readonly own = new Map<string, number>()
+
+  private noteOwn(projectId: string, path: string): void {
+    const now = Date.now()
+    if (this.own.size > 500) for (const [k, t] of this.own) if (now - t > OWN_WINDOW_MS) this.own.delete(k)
+    this.own.set(`${projectId}:${path.toLowerCase()}`, now)
+  }
+
+  private isOwn(projectId: string, path: string): boolean {
+    const now = Date.now()
+    const parts = path.toLowerCase().split('/')
+    // The path itself, or a folder above it that this app just changed (deleted, renamed, restored).
+    for (let i = parts.length; i > 0; i--) {
+      const t = this.own.get(`${projectId}:${parts.slice(0, i).join('/')}`)
+      if (t !== undefined && now - t <= OWN_WINDOW_MS) return true
+    }
+    return false
+  }
+
+  /**
+   * Watches one project folder so the file tree, editors and Source Control notice edits made outside the app. Only one
+   * project is watched at a time (the one on screen); null stops. Returns false when the folder cannot be watched.
+   */
+  watchProject(projectId: string | null): boolean {
+    if (this.watcher && this.watcher.projectId === projectId && this.watcher.w.running) return true
+    this.stopWatching()
+    if (!projectId) return true
+    let root: string
+    try {
+      root = this.sandbox(projectId).root
+    } catch {
+      return false
+    }
+    const w = new FolderWatcher(root, (path, exists) => {
+      if (this.isOwn(projectId, path)) return
+      this.emit({ projectId, path, kind: exists ? 'write' : 'remove', by: 'external' })
+    })
+    if (!w.start()) return false
+    this.watcher = { projectId, w }
+    return true
+  }
+
+  stopWatching(): void {
+    this.watcher?.w.stop()
+    this.watcher = null
   }
 
   /** Lets other services that write into a project folder (the asset pipeline) refresh the file tree. */
   notify(c: FsChange): void {
     this.emit(c)
+  }
+
+  // ------------------------------------------------------------------ undo journal for agent tasks (Auto Recovery)
+
+  private readonly journals = new Map<string, TaskJournal>()
+
+  /** From now on, the agent write/delete tools remember what each file looked like before this task changed it. */
+  beginJournal(taskId: string): void {
+    this.journals.set(taskId, new TaskJournal())
+  }
+
+  /** Forgets the journal (the task is finished or was rolled back). */
+  endJournal(taskId: string): void {
+    this.journals.delete(taskId)
+  }
+
+  /** Undoes what the task changed through the write/delete tools and tells the UI which files changed. */
+  async rollbackJournal(projectId: string, taskId: string): Promise<RollbackResult> {
+    const j = this.journals.get(taskId)
+    if (!j) return { restored: [], removed: [], skipped: [] }
+    const r = await j.rollback(this.sandbox(projectId))
+    for (const path of [...r.restored, ...r.removed]) this.emit({ projectId, path, kind: r.removed.includes(path) ? 'remove' : 'write', by: 'agent' })
+    return r
   }
 
   project(projectId: string): { id: string; name: string; rootPath: string } {
@@ -114,6 +193,7 @@ export class WorkspaceService {
     const lock = this.locks.heldByOther(projectId, a.rel)
     if (lock) throw new WorkspaceError(`“${a.rel}” is being edited by ${lock.agentName ?? 'an agent'}.`, 'locked')
     const r = await sb.rename(from, to)
+    this.noteOwn(projectId, r.to)
     this.emit({ projectId, path: r.from, kind: 'rename', by: 'user' })
     return r
   }
@@ -183,7 +263,10 @@ export class WorkspaceService {
     const { rel } = sb.resolve(path)
     if (isSecretPath(rel)) throw new WorkspaceError(`“${rel}” may hold credentials, so agents cannot write it.`, 'denied')
     this.locks.acquire(projectId, rel, actor.agent.id, actor.taskId)
+    const journal = this.journals.get(actor.taskId)
+    await journal?.capture(sb, rel)
     const r = await sb.write(rel, content, { expectedHash })
+    await journal?.settle(sb, rel, false)
     this.events.record({ projectId, runId: actor.runId, agentId: actor.agent.id, type: 'file.written', message: `${actor.agent.name} ${r.created ? 'created' : 'wrote'} ${r.path} (${r.size} bytes)` })
     this.emit({ projectId, path: r.path, kind: 'write', by: 'agent' })
     return r
@@ -194,7 +277,10 @@ export class WorkspaceService {
     const sb = this.sandbox(projectId)
     const { rel } = sb.resolve(path)
     this.locks.acquire(projectId, rel, actor.agent.id, actor.taskId)
+    const journal = this.journals.get(actor.taskId)
+    await journal?.capture(sb, rel)
     const r = await sb.remove(rel, { filesOnly: true })
+    await journal?.settle(sb, rel, true)
     this.events.record({ projectId, runId: actor.runId, agentId: actor.agent.id, level: 'warn', type: 'file.deleted', message: `${actor.agent.name} deleted ${r.path}` })
     this.emit({ projectId, path: r.path, kind: 'remove', by: 'agent' })
     return r.path

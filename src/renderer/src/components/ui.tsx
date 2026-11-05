@@ -21,7 +21,7 @@ export function Button({
     <button
       {...rest}
       className={cx(
-        'inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed',
+        'inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed',
         size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-[13px]',
         variants[variant],
         className
@@ -110,7 +110,7 @@ export function StatCard({
   )
 }
 
-const FIELD = 'w-full rounded-md border border-line bg-bg px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-accent focus:outline-none'
+const FIELD = 'rounded-md border border-line bg-bg px-2.5 text-[13px] text-fg placeholder:text-faint focus:border-accent focus:outline-none'
 
 export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
   return (
@@ -121,9 +121,11 @@ export function Field({ label, hint, children }: { label: string; hint?: ReactNo
     </label>
   )
 }
-export const Input = (p: InputHTMLAttributes<HTMLInputElement>) => <input {...p} className={cx(FIELD, 'h-8', p.className)} />
-export const Select = (p: SelectHTMLAttributes<HTMLSelectElement>) => <select {...p} className={cx(FIELD, 'h-8', p.className)} />
-export const Textarea = (p: TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...p} className={cx(FIELD, 'resize-none py-1.5', p.className)} />
+/** Fields fill their container unless the caller sets its own width (a w-* class), which Tailwind would otherwise lose to w-full. */
+const fullWidth = (className?: string): string => (/(^|\s)w-/.test(className ?? '') ? '' : 'w-full')
+export const Input = (p: InputHTMLAttributes<HTMLInputElement>) => <input {...p} className={cx(FIELD, fullWidth(p.className), 'h-8', p.className)} />
+export const Select = (p: SelectHTMLAttributes<HTMLSelectElement>) => <select {...p} className={cx(FIELD, fullWidth(p.className), 'h-8', p.className)} />
+export const Textarea = (p: TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...p} className={cx(FIELD, fullWidth(p.className), 'resize-none py-1.5', p.className)} />
 
 export function Modal({ title, onClose, children, footer }: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
   useEffect(() => {

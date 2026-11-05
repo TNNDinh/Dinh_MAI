@@ -1,4 +1,4 @@
-import { FolderOpen, FolderPlus, GitBranch } from 'lucide-react'
+import { Archive, ChevronDown, ChevronRight, FolderOpen, FolderPlus, GitBranch } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { PROJECT_TYPES, type FolderInspection, type Project, type ProjectType } from '../../../shared/ipc'
 import { useStudio } from '../store'
@@ -176,9 +176,13 @@ function ProjectCard({ p }: { p: Project }) {
 export function Projects() {
   const { projects, selectedProjectId } = useStudio()
   const [creating, setCreating] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
   const selected = selectedProjectId ? projects.find((p) => p.id === selectedProjectId) : undefined
 
   if (selected) return <ProjectDetail project={selected} />
+
+  const live = projects.filter((p) => p.status !== 'archived')
+  const archived = projects.filter((p) => p.status === 'archived')
 
   return (
     <div className="page-enter mx-auto max-w-6xl p-6">
@@ -191,17 +195,34 @@ export function Projects() {
           </Button>
         }
       />
-      {projects.length === 0 ? (
+      {live.length === 0 ? (
         <Card>
-          <EmptyState icon={<FolderPlus size={24} />} title="No projects yet">
-            Create a project to give your AI team a workspace. You can start from an empty folder or open an existing codebase.
+          <EmptyState icon={<FolderPlus size={24} />} title={archived.length ? 'No active projects' : 'No projects yet'}>
+            {archived.length
+              ? 'Every project is archived. Open the archive below to restore one, or create a new project.'
+              : 'Create a project to give your AI team a workspace. You can start from an empty folder or open an existing codebase.'}
           </EmptyState>
         </Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {projects.map((p) => (
+          {live.map((p) => (
             <ProjectCard key={p.id} p={p} />
           ))}
+        </div>
+      )}
+      {archived.length > 0 && (
+        <div className="mt-6" data-archived-section>
+          <button onClick={() => setShowArchived((v) => !v)} className="flex items-center gap-1.5 text-xs font-medium text-muted hover:text-fg" aria-expanded={showArchived} data-archived-toggle>
+            {showArchived ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <Archive size={13} /> Archived ({archived.length})
+          </button>
+          {showArchived && (
+            <div className="mt-3 grid gap-3 opacity-75 sm:grid-cols-2 xl:grid-cols-3">
+              {archived.map((p) => (
+                <ProjectCard key={p.id} p={p} />
+              ))}
+            </div>
+          )}
         </div>
       )}
       {creating && <CreateProjectModal onClose={() => setCreating(false)} />}

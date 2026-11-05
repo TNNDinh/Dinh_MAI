@@ -2,6 +2,9 @@ import type { AppInfo, ChatStreamEvent, IpcChannel, IpcContract } from '../../sh
 import type { AgentService } from '../services/agents'
 import type { ChatService } from '../services/chat'
 import type { AssetService } from '../assets/service'
+import type { AutomationService } from '../automation/service'
+import type { GitService } from '../git/service'
+import type { PreviewService } from '../preview/service'
 import type { ConnectionService } from '../services/connections'
 import type { DashboardService } from '../services/dashboard'
 import type { EventService } from '../services/events'
@@ -38,6 +41,9 @@ export interface HandlerDeps {
   assets: AssetService
   workflows: WorkflowService
   workflowEngine: WorkflowEngine
+  git: GitService
+  automation: AutomationService
+  preview: PreviewService
   host: HostBridge
 }
 
@@ -45,8 +51,32 @@ export type Handlers = {
   [K in IpcChannel]: (...args: Parameters<IpcContract[K]>) => ReturnType<IpcContract[K]> | Promise<ReturnType<IpcContract[K]>>
 }
 
-export function createHandlers({ projects, dashboard, events, connections, chat, agents, tasks, orchestrator, workspace, commands, assets, workflows, workflowEngine, host }: HandlerDeps): Handlers {
+export function createHandlers({ projects, dashboard, events, connections, chat, agents, tasks, orchestrator, workspace, commands, assets, workflows, workflowEngine, git, automation, preview, host }: HandlerDeps): Handlers {
   return {
+    'automation:detect': (projectId) => automation.detect(String(projectId)),
+    'automation:run': (input) => automation.start(String(input?.projectId), input?.kind),
+    'automation:list': (projectId) => automation.list(String(projectId)),
+    'automation:cancel': (id) => automation.cancel(String(id)),
+    'preview:options': (projectId) => preview.options(String(projectId)),
+    'preview:get': (projectId) => preview.get(String(projectId)),
+    'preview:start': (input) => preview.start(String(input?.projectId), input?.mode === 'dev' ? 'dev' : 'static', typeof input?.folder === 'string' ? input.folder : ''),
+    'preview:stop': (projectId) => preview.stop(String(projectId)),
+    'git:status': (projectId) => git.status(String(projectId)),
+    'git:init': (projectId) => git.init(String(projectId)),
+    'git:log': (input) => git.log(String(input?.projectId), typeof input?.limit === 'number' ? input.limit : undefined),
+    'git:diff': (input) => git.diff({ projectId: String(input?.projectId), path: String(input?.path ?? ''), staged: input?.staged === true }),
+    'git:commit': (input) =>
+      git.commit({
+        projectId: String(input?.projectId),
+        message: String(input?.message ?? ''),
+        paths: Array.isArray(input?.paths) ? input.paths.map((p) => String(p)) : undefined
+      }),
+    'git:branches': (projectId) => git.branches(String(projectId)),
+    'git:switch': (input) => git.switchBranch(String(input?.projectId), String(input?.branch ?? ''), input?.create === true),
+    'checkpoints:list': (projectId) => git.listCheckpoints(String(projectId)),
+    'checkpoints:create': (input) => git.createCheckpoint({ projectId: String(input?.projectId), label: typeof input?.label === 'string' ? input.label : undefined }),
+    'checkpoints:restore': (input) => git.restoreCheckpoint(String(input?.id)),
+    'checkpoints:remove': (id) => git.removeCheckpoint(String(id)),
     'runs:start': (input) => orchestrator.start(input),
     'runs:list': (projectId) => orchestrator.listRuns(projectId === null || projectId === undefined ? undefined : String(projectId)),
     'runs:stop': (id) => (workflowEngine.isWorkflowRun(String(id)) ? workflowEngine.stop(String(id)) : orchestrator.stop(String(id))),
@@ -59,6 +89,7 @@ export function createHandlers({ projects, dashboard, events, connections, chat,
       assets.cancelAll()
       // Also kill every running command and deny every command waiting for approval.
       commands.killAll()
+      void preview.stopAll()
       const [planned, drawn] = await Promise.all([orchestrator.stopAll(), flows])
       return planned + drawn
     },
@@ -69,6 +100,7 @@ export function createHandlers({ projects, dashboard, events, connections, chat,
     'workflows:run': (input) => workflowEngine.start(input),
     'workflows:runs': (workflowId) => workflowEngine.listRuns(String(workflowId)),
     'workflows:runState': (runId) => workflowEngine.getRunState(String(runId)),
+    'fs:watch': (id) => workspace.watchProject(id === null || id === undefined ? null : String(id)),
     'fs:list': (i) => workspace.list(String(i.projectId), i.path === undefined ? '' : String(i.path), i.includeIgnored === true),
     'fs:read': (i) => workspace.read(String(i.projectId), String(i.path)),
     'fs:write': (i) =>
@@ -114,6 +146,8 @@ export function createHandlers({ projects, dashboard, events, connections, chat,
       }),
     'assets:cancel': (id) => assets.cancel(String(id)),
     'assets:process': (i) => assets.process({ id: String(i.id), operation: i.operation, replace: i.replace === true }),
+    'assets:scan': (id) => assets.scan(String(id)),
+    'assets:import': (i) => assets.importFiles(i),
     'assets:remove': (i) => assets.remove(String(i.id), i.deleteFile === true),
     'assets:reveal': (id) => host.revealInFolder(assets.absolutePath(String(id))),
     'images:setPrice': (i) => connections.setImagePrice(String(i.connectionId), String(i.model ?? ''), i.priceUsd === null || i.priceUsd === undefined ? null : Number(i.priceUsd)),
@@ -122,6 +156,7 @@ export function createHandlers({ projects, dashboard, events, connections, chat,
     'approvals:respond': (i) => commands.approvals.respond(String(i.id), i.allow === true),
     'tasks:list': (filter) => tasks.list(filter ?? {}),
     'tasks:get': (id) => tasks.detail(String(id)),
+    'tasks:team': (input) => tasks.team(input ?? {}),
     'tasks:create': (input) => tasks.create(input),
     'tasks:update': (input) => tasks.update(input),
     'tasks:remove': (id) => tasks.remove(String(id)),
@@ -144,6 +179,7 @@ export function createHandlers({ projects, dashboard, events, connections, chat,
     'chat:start': (input) => chat.start(input, (e) => host.emitChat(e)),
     'chat:cancel': (id) => chat.cancel(String(id)),
     'usage:byModel': () => chat.usageByModel(),
+    'usage:byAgent': (input) => chat.usageByAgent(input?.projectId),
     'app:info': () => host.appInfo(),
     'projects:list': () => projects.list(),
     'projects:get': (id) => projects.get(String(id)),

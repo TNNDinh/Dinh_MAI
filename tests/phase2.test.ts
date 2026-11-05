@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { IPC_CHANNELS, type ActivityEvent } from '../src/shared/ipc'
 import { AssetService } from '../src/main/assets/service'
 import { Database } from '../src/main/db/database'
+import { AutomationService } from '../src/main/automation/service'
+import { GitService } from '../src/main/git/service'
+import { PreviewService } from '../src/main/preview/service'
 import { assertSafeProjectRoot, isPathInside, normalizePath, toFolderName } from '../src/main/security/path-guard'
 import { detectProjectType } from '../src/main/workspace/detect-project-type'
 import { EventService } from '../src/main/services/events'
@@ -322,6 +325,9 @@ describe('IPC registration', () => {
       assets: new AssetService({ db, events, workspace, connections }),
       workflows,
       workflowEngine: new WorkflowEngine(db, events, agents, orchestrator, workflows),
+      git: new GitService(db, events, workspace),
+      automation: new AutomationService(events, workspace, commands),
+      preview: new PreviewService(events, workspace),
       host: {
         emitChat: () => undefined,
         appInfo: () => ({ name: 't', version: '0', electron: '0', node: '0', platform: 'win32', userDataPath: '', defaultProjectsRoot: '', dbVersion: 1, encryptionAvailable: true }),

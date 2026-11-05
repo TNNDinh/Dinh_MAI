@@ -96,6 +96,7 @@ export function AssetDetail({
           <div className="flex shrink-0 gap-1">
             <Badge tone="info">{kindLabel}</Badge>
             {asset.origin === 'processed' && <Badge>processed</Badge>}
+            {asset.origin === 'imported' && <Badge>imported</Badge>}
           </div>
         </div>
         <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-3 gap-y-1 text-xs" data-selectable>

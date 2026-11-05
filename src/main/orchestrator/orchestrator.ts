@@ -134,9 +134,28 @@ export interface StepSpec {
   image?: { prompt: string; kind: AssetKind; size?: string; transparent: boolean }
 }
 
+export interface RecoveryTask {
+  projectId: string
+  runId: string
+  taskId: string
+  title: string
+}
+
+/** Auto Recovery: a safety net around each agent task. Implemented in git/recovery.ts; absent = the feature does not exist for this orchestrator. */
+export interface TaskRecovery {
+  /** Before a task attempt: saves a checkpoint and starts the undo journal (when the project opted in). Never throws. */
+  begin(t: RecoveryTask): Promise<void>
+  /** A task attempt failed: puts back the files it changed. Returns null when nothing was done (project did not opt in). Never throws. */
+  rollback(t: RecoveryTask, reason: string): Promise<{ restored: number; removed: number; skipped: number } | null>
+  /** The task is over (finished, failed or stopped): drop the journal. */
+  end(taskId: string): void
+}
+
 type Pick = { kind: 'agent'; agent: Agent } | { kind: 'wait' } | { kind: 'error'; message: string }
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}\n[truncated: ${s.length - n} more characters]` : s)
+const recoveryNote = (message: string): string =>
+  `Your previous attempt failed: ${clip(message, 1_500)}\nAuto Recovery undid the file changes you made in that attempt, so the project files are as they were before it started. Work from the current files.`
 const usd = (n: number): string => `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}`
 
 /**
@@ -146,6 +165,8 @@ const usd = (n: number): string => `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}`
  */
 export class Orchestrator {
   private readonly active = new Map<string, ActiveRun>()
+  /** What to tell the agent about why its previous attempt was rolled back (only when Auto Recovery undid something). */
+  private readonly failureNotes = new Map<string, string>()
 
   constructor(
     private readonly db: Database,
@@ -154,7 +175,7 @@ export class Orchestrator {
     private readonly gateway: LlmGateway,
     private readonly tasks: TaskService,
     /** Gives agents the file and command tools. Without it they only get memory and task tools. */
-    private readonly workspace: { workspace: WorkspaceService; commands: CommandService; assets?: AssetService } | null = null,
+    private readonly workspace: { workspace: WorkspaceService; commands: CommandService; assets?: AssetService; recovery?: TaskRecovery } | null = null,
     private readonly now: () => number = Date.now
   ) {}
 
@@ -609,6 +630,9 @@ export class Orchestrator {
     this.events.record({ projectId: run.project_id, runId, agentId: agent.id, type: 'task.started', message: `${agent.name} started “${task.title}”${attempts > 1 ? ` (attempt ${attempts})` : ''}` })
     this.updateProgress(run)
     const state = { reworkRequested: false }
+    const recovery = this.workspace?.recovery
+    const rt0 = { projectId: run.project_id, runId, taskId: task.id, title: task.title }
+    await recovery?.begin(rt0)
     try {
       const result = agent.kind === 'image' ? await this.imageTask(run, task, agent, signal, rt) : await this.converse(run, task, agent, signal, rt, state)
       if (state.reworkRequested) {
@@ -629,14 +653,18 @@ export class Orchestrator {
       } else {
         const message = e instanceof Error ? e.message : String(e)
         const retryable = !(e instanceof AgentLimitReached) && (!(e instanceof CallFailedError) || e.retryable)
+        // Auto Recovery: undo what the failed attempt did to the files (before the locks are released, so nobody else can have touched them).
+        const undone = await recovery?.rollback(rt0, message)
         if (retryable && attempts < MAX_ATTEMPTS) {
           this.db.run(`UPDATE tasks SET status = 'todo', error = ?, updated_at = ? WHERE id = ?`, message, this.now(), task.id)
           this.events.record({ projectId: run.project_id, runId, agentId: agent.id, level: 'warn', type: 'task.retry', message: `“${task.title}” failed (${clip(message, 160)}); retrying` })
+          if (undone && undone.restored + undone.removed > 0) this.failureNotes.set(task.id, recoveryNote(message))
         } else {
           this.failTask(run, task, message, agent)
         }
       }
     } finally {
+      recovery?.end(task.id)
       this.workspace?.workspace.locks.releaseTask(task.id)
       this.setAgentStatus(agent.id, 'idle')
       this.updateProgress(run)
@@ -784,6 +812,11 @@ export class Orchestrator {
   private taskPrompt(run: RunRow, task: TaskRow, agent: Agent, context?: string): string {
     const parts: string[] = [`Overall goal of this run: ${run.goal}`, '', `Your task: ${task.title}`, task.description || '(no further description)']
     if (context?.trim()) parts.push('', clip(context.trim(), 40_000))
+    const failure = this.failureNotes.get(task.id)
+    if (failure) {
+      parts.push('', failure)
+      this.failureNotes.delete(task.id)
+    }
     const deps = this.db.all<{ title: string; name: string | null; result_summary: string | null }>(
       `SELECT dep.title, a.name, dep.result_summary
          FROM task_dependencies d JOIN tasks dep ON dep.id = d.depends_on_task_id LEFT JOIN agents a ON a.id = dep.assigned_agent_id
@@ -828,10 +861,13 @@ export class Orchestrator {
     const created = this.tasks.create({ projectId: run.project_id, runId, title: spec.title.slice(0, 200), description: spec.description.slice(0, 7_800), assignedAgentId: agent.id })
     const task: TaskRow = { id: created.id, title: created.title, description: created.description, role: null, assigned_agent_id: agent.id, status: 'todo', priority: created.priority, attempts: 0, result_summary: null }
     const finishTask = (status: 'failed', error: string): void => void this.db.run(`UPDATE tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?`, status, error, this.now(), task.id)
+    const recovery = this.workspace?.recovery
+    const rt0 = { projectId: run.project_id, runId, taskId: task.id, title: task.title }
     for (let attempt = 1; ; attempt++) {
       this.db.run(`UPDATE tasks SET status = 'in_progress', attempts = ?, error = NULL, updated_at = ? WHERE id = ?`, attempt, this.now(), task.id)
       this.setAgentStatus(agent.id, 'working')
       this.events.record({ projectId: run.project_id, runId, agentId: agent.id, type: 'task.started', message: `${agent.name} started “${task.title}”${attempt > 1 ? ` (attempt ${attempt})` : ''}` })
+      await recovery?.begin(rt0)
       try {
         const text = spec.image
           ? await this.paint(run, task, agent, spec.image, signal, rt)
@@ -850,13 +886,16 @@ export class Orchestrator {
         }
         const message = e instanceof Error ? e.message : String(e)
         const retryable = !(e instanceof AgentLimitReached) && (!(e instanceof CallFailedError) || e.retryable)
+        const undone = await recovery?.rollback(rt0, message)
         if (retryable && attempt < MAX_ATTEMPTS) {
           this.events.record({ projectId: run.project_id, runId, agentId: agent.id, level: 'warn', type: 'task.retry', message: `“${task.title}” failed (${clip(message, 160)}); retrying` })
+          if (undone && undone.restored + undone.removed > 0) this.failureNotes.set(task.id, recoveryNote(message))
           continue
         }
         this.failTask(run, task, message, agent)
         throw e
       } finally {
+        recovery?.end(task.id)
         this.workspace?.workspace.locks.releaseTask(task.id)
         this.setAgentStatus(agent.id, 'idle')
       }

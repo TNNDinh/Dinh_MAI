@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { ChatStartInput, ChatStreamEvent, ModelUsageRow } from '../../shared/ipc'
+import type { AgentUsageRow, ChatStartInput, ChatStreamEvent, ModelUsageRow } from '../../shared/ipc'
 import type { Database } from '../db/database'
 import { ProviderError } from '../providers/http'
 import { estimateCostUsd } from '../providers/usage'
@@ -236,6 +236,48 @@ export class ChatService implements LlmGateway {
       error,
       Date.now()
     )
+  }
+
+  /** Usage grouped by agent (optionally for one project). Calls made outside any agent, and calls of an agent that was deleted (the database clears their agent), are grouped under null. */
+  usageByAgent(projectId?: string): AgentUsageRow[] {
+    interface Row {
+      agent_id: string | null
+      name: string | null
+      role: string | null
+      calls: number
+      in_tok: number
+      out_tok: number
+      cost: number
+      unpriced: number
+      failed: number
+    }
+    return this.db
+      .all<Row>(
+        `SELECT l.agent_id, a.name, a.role,
+                COUNT(*) calls,
+                COALESCE(SUM(l.input_tokens), 0) in_tok,
+                COALESCE(SUM(l.output_tokens), 0) out_tok,
+                COALESCE(SUM(l.cost_usd), 0) cost,
+                SUM(CASE WHEN l.status = 'ok' AND l.cost_usd IS NULL THEN 1 ELSE 0 END) unpriced,
+                SUM(CASE WHEN l.status != 'ok' THEN 1 ELSE 0 END) failed
+           FROM llm_calls l LEFT JOIN agents a ON a.id = l.agent_id
+          WHERE (? IS NULL OR l.project_id = ?)
+          GROUP BY l.agent_id
+          ORDER BY cost DESC, calls DESC`,
+        projectId ?? null,
+        projectId ?? null
+      )
+      .map((r) => ({
+        agentId: r.agent_id,
+        agentName: r.name ?? '(no agent: Playground, tests, deleted agents)',
+        role: r.role,
+        calls: r.calls,
+        inputTokens: r.in_tok,
+        outputTokens: r.out_tok,
+        costUsd: r.cost,
+        unpricedCalls: r.unpriced,
+        failedCalls: r.failed
+      }))
   }
 
   /** Usage grouped by model; survives connection deletion (the call rows keep their model name). */

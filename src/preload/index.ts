@@ -2,15 +2,19 @@ import { contextBridge, ipcRenderer } from 'electron'
 import {
   ACTIVITY_CHANNEL,
   APPROVAL_CHANNEL,
+  AUTOMATION_CHANNEL,
   CHAT_CHANNEL,
   FS_CHANNEL,
   IPC_CHANNELS,
+  PREVIEW_CHANNEL,
   TERMINAL_CHANNEL,
   type ActivityEvent,
+  type AutomationRun,
   type ChatStreamEvent,
   type FsChange,
   type IpcResult,
   type PendingApproval,
+  type PreviewInfo,
   type StudioApi,
   type TerminalEvent
 } from '../shared/ipc'
@@ -47,7 +51,9 @@ const api: StudioApi = {
   onChatEvent: (cb) => subscribe<ChatStreamEvent>(CHAT_CHANNEL, cb),
   onTerminalEvent: (cb) => subscribe<TerminalEvent>(TERMINAL_CHANNEL, cb),
   onApprovalsChanged: (cb) => subscribe<PendingApproval[]>(APPROVAL_CHANNEL, cb),
-  onFsChange: (cb) => subscribe<FsChange>(FS_CHANNEL, cb)
+  onFsChange: (cb) => subscribe<FsChange>(FS_CHANNEL, cb),
+  onAutomation: (cb) => subscribe<AutomationRun>(AUTOMATION_CHANNEL, cb),
+  onPreview: (cb) => subscribe<PreviewInfo>(PREVIEW_CHANNEL, cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)

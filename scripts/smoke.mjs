@@ -13,7 +13,9 @@ if (existsSync(join(out, 'smoke.json'))) rmSync(join(out, 'smoke.json'))
 // VS Code's terminal (and some CI shells) export ELECTRON_RUN_AS_NODE=1, which makes the
 // Electron binary behave as plain Node: `require('electron')` then has no `app`.
 const { ELECTRON_RUN_AS_NODE: _ignored, ...cleanEnv } = process.env
-const r = spawnSync(electron, [resolve('.')], {
+// SMOKE_EXE=<path to the packaged exe> runs the same checks against an installed/unpacked build instead of the sources.
+const packaged = process.env.SMOKE_EXE
+const r = spawnSync(packaged ?? electron, packaged ? [] : [resolve('.')], {
   env: { ...cleanEnv, MADS_SMOKE: out, MADS_USER_DATA: userData, ELECTRON_RENDERER_URL: '' },
   stdio: 'inherit',
   timeout: 240_000

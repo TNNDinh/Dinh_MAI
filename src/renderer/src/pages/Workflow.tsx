@@ -1,9 +1,10 @@
 import '@xyflow/react/dist/style.css'
 import { Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider, applyEdgeChanges, applyNodeChanges, useReactFlow, type Connection, type EdgeChange, type NodeChange } from '@xyflow/react'
-import { ChevronDown, ChevronUp, Play, Plus, Save, Trash2, TriangleAlert, Workflow as WorkflowIcon } from 'lucide-react'
+import { ChevronDown, ChevronUp, CopyPlus, Network, Play, Plus, Redo2, Save, Trash2, TriangleAlert, Undo2, Workflow as WorkflowIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Run, WorkflowRunState } from '../../../shared/ipc'
 import { checkGraph, checkTeam, newNode, sourceHandleOf, type Workflow, type WorkflowNode, type WorkflowNodeType, type WorkflowSummary } from '../../../shared/workflow'
+import { GraphHistory, autoLayout, copyFragment, pasteFragment, type Fragment } from '../../../shared/workflow-edit'
 import { errMsg } from '../components/connections/StatusBadge'
 import { Inspector } from '../components/workflow/Inspector'
 import { NewDialog, type NewChoice } from '../components/workflow/NewDialog'
@@ -17,6 +18,12 @@ import { useWorkspaceProject } from '../lib/use-workspace-project'
 import { useStudio } from '../store'
 
 const NODE_TYPES_MAP = { step: StepNodeView }
+
+/** Copied steps live here (not in the component) so they can be pasted into another workflow after switching. */
+let clipboard: { fragment: Fragment; pastes: number } | null = null
+
+/** Keyboard shortcuts must not fire while the user types in a field. */
+const typing = (t: EventTarget | null): boolean => t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
 
 /** What is open in the editor besides the drawing itself. */
 interface Open {
@@ -64,6 +71,8 @@ function Editor() {
   const [busy, setBusy] = useState(false)
   const openRef = useRef<Open | null>(null)
   openRef.current = open
+  const history = useRef(new GraphHistory())
+  const [, setHistoryTick] = useState(0)
 
   const projectId = project?.id ?? null
   const team = useMemo(() => agents.filter((a) => a.projectId === projectId), [agents, projectId])
@@ -74,6 +83,115 @@ function Editor() {
   const errors = issues.filter((i) => i.severity === 'error')
   const selectedId = nodes.find((n) => n.selected)?.id ?? null
   const selected = selectedId ? (graph.nodes.find((n) => n.id === selectedId) ?? null) : null
+
+  // ---- undo / redo
+
+  const graphRef = useRef(graph)
+  graphRef.current = graph
+  const recordTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushHistory = useCallback((): void => {
+    if (recordTimer.current) clearTimeout(recordTimer.current)
+    recordTimer.current = null
+    if (history.current.record(graphRef.current)) setHistoryTick((t) => t + 1)
+  }, [])
+
+  // A newly opened workflow starts a new history.
+  const loadId = open?.loadId ?? 0
+  useEffect(() => {
+    if (recordTimer.current) clearTimeout(recordTimer.current)
+    recordTimer.current = null
+    history.current.reset(graphRef.current)
+    setHistoryTick((t) => t + 1)
+  }, [loadId])
+
+  // Every settled edit becomes one undo step; a drag (many small moves) is one step, not hundreds.
+  const gKey = useMemo(() => graphKey(graph), [graph])
+  useEffect(() => {
+    if (!open) return
+    if (recordTimer.current) clearTimeout(recordTimer.current)
+    recordTimer.current = setTimeout(flushHistory, 350)
+    return () => {
+      if (recordTimer.current) clearTimeout(recordTimer.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gKey])
+
+  const restore = (g: ReturnType<GraphHistory['undo']>): void => {
+    if (!g) return
+    const keep = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
+    const f = toFlow(g)
+    setNodes(f.nodes.map((n) => ({ ...n, selected: keep.has(n.id) })))
+    setEdges(f.edges)
+    setNotice(null)
+    setHistoryTick((t) => t + 1)
+  }
+  const undo = (): void => {
+    flushHistory()
+    restore(history.current.undo())
+  }
+  const redo = (): void => {
+    flushHistory()
+    restore(history.current.redo())
+  }
+
+  // ---- copy, paste, duplicate, tidy
+
+  const copy = (): boolean => {
+    const f = copyFragment(graph, new Set(nodes.filter((n) => n.selected).map((n) => n.id)))
+    if (!f) return false
+    clipboard = { fragment: f, pastes: 0 }
+    return true
+  }
+  const paste = (): void => {
+    if (!clipboard) return
+    touch()
+    clipboard.pastes += 1
+    const d = 40 * clipboard.pastes
+    const p = pasteFragment(clipboard.fragment, new Set([...nodes.map((n) => n.id), ...edges.map((e) => e.id)]), { x: d, y: d }, newId)
+    const f = toFlow({ nodes: p.nodes, edges: p.edges })
+    setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), ...f.nodes.map((n) => ({ ...n, selected: true }))])
+    setEdges((es) => [...es, ...f.edges])
+  }
+  const duplicate = (): void => {
+    if (copy()) paste()
+  }
+  const tidy = (): void => {
+    if (nodes.length === 0) return
+    touch()
+    const pos = autoLayout(graph)
+    setNodes((ns) => ns.map((n) => ({ ...n, position: pos.get(n.id) ?? n.position })))
+    setTimeout(() => void flow.fitView({ padding: 0.2, maxZoom: 1, duration: 200 }), 60)
+  }
+
+  // Shortcuts: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo, Ctrl+C copy, Ctrl+V paste, Ctrl+D duplicate.
+  const shortcuts = useRef<(e: KeyboardEvent) => void>(() => undefined)
+  shortcuts.current = (e) => {
+    if (!open || dialog || !(e.ctrlKey || e.metaKey) || e.altKey || typing(e.target)) return
+    const k = e.key.toLowerCase()
+    if (k === 'z') {
+      e.preventDefault()
+      if (e.shiftKey) redo()
+      else undo()
+    } else if (k === 'y') {
+      e.preventDefault()
+      redo()
+    } else if (k === 'c') {
+      if (!window.getSelection()?.toString() && copy()) e.preventDefault()
+    } else if (k === 'v') {
+      if (clipboard) {
+        e.preventDefault()
+        paste()
+      }
+    } else if (k === 'd') {
+      e.preventDefault()
+      duplicate()
+    }
+  }
+  useEffect(() => {
+    const h = (e: KeyboardEvent): void => shortcuts.current(e)
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
 
   // ---- loading
 
@@ -370,6 +488,18 @@ function Editor() {
             <Badge tone={open.projectId === null ? 'info' : 'neutral'}>{open.projectId === null ? 'Shared' : 'This project'}</Badge>
             {dirty && <span className="text-[11px] text-warn" data-wf-dirty>Unsaved changes</span>}
             <div className="ml-auto flex items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={undo} disabled={!history.current.canUndo && !dirty} aria-label="Undo" title="Undo (Ctrl+Z)" data-wf-action="undo">
+                <Undo2 size={13} />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={redo} disabled={!history.current.canRedo} aria-label="Redo" title="Redo (Ctrl+Shift+Z)" data-wf-action="redo">
+                <Redo2 size={13} />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={duplicate} disabled={!selectedId} aria-label="Duplicate the selected steps" title="Duplicate the selected steps (Ctrl+D). Copy with Ctrl+C and paste with Ctrl+V, also into another workflow." data-wf-action="duplicate">
+                <CopyPlus size={13} />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={tidy} disabled={nodes.length < 2} aria-label="Tidy up the layout" title="Arrange the steps left to right" data-wf-action="tidy">
+                <Network size={13} />
+              </Button>
               <Button size="sm" onClick={() => setBottom(bottom === 'problems' ? null : 'problems')} data-wf-action="problems" title="Problems found in the graph and the team">
                 <TriangleAlert size={13} className={errors.length ? 'text-err' : issues.length ? 'text-warn' : 'text-faint'} /> {issues.length}
               </Button>

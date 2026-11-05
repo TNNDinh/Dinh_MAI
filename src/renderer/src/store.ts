@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import type { ActivityEvent, Agent, AgentTemplateInfo, AppInfo, Connection, DashboardStats, PendingApproval, ProviderCatalogItem, Project, Run, Task } from '../../shared/ipc'
+import type { ActivityEvent, Agent, AgentTemplateInfo, AppInfo, AutomationRun, Connection, PreviewInfo, DashboardStats, PendingApproval, ProviderCatalogItem, Project, Run, Task } from '../../shared/ipc'
 
-export type Page = 'dashboard' | 'projects' | 'workspace' | 'agents' | 'connections' | 'workflow' | 'assets' | 'tasks' | 'settings'
+export type Page = 'dashboard' | 'projects' | 'workspace' | 'agents' | 'connections' | 'workflow' | 'assets' | 'tasks' | 'source' | 'preview' | 'settings'
 export type RightTab = 'activity' | 'chat' | 'tasks' | 'usage'
 export type BottomTab = 'logs' | 'terminal' | 'build' | 'problems' | 'tests'
 
@@ -36,7 +36,13 @@ interface StudioState {
   approvals: PendingApproval[]
   /** The user chose “decide later”: show a status-bar chip instead of the dialog until something new arrives. */
   approvalsMinimized: boolean
+  /** Build / test / lint runs seen so far (newest first, one entry per run id). */
+  automation: AutomationRun[]
+  /** Live preview of each project that has one. */
+  previews: Record<string, PreviewInfo>
 
+  applyAutomation: (runs: AutomationRun[]) => void
+  applyPreview: (info: PreviewInfo) => void
   setApprovalsMinimized: (v: boolean) => void
   setWorkspaceProject: (id: string | null) => void
   clearTerminal: (projectId: string) => void
@@ -78,7 +84,15 @@ export const useStudio = create<StudioState>((set, get) => ({
   terminal: [],
   approvals: [],
   approvalsMinimized: false,
+  automation: [],
+  previews: {},
 
+  applyAutomation: (runs) =>
+    set((s) => {
+      const ids = new Set(runs.map((r) => r.id))
+      return { automation: [...runs, ...s.automation.filter((r) => !ids.has(r.id))].sort((a, b) => b.startedAt - a.startedAt).slice(0, 100) }
+    }),
+  applyPreview: (info) => set((s) => ({ previews: { ...s.previews, [info.projectId]: info } })),
   setApprovalsMinimized: (approvalsMinimized) => set({ approvalsMinimized }),
   setWorkspaceProject: (workspaceProjectId) => set({ workspaceProjectId }),
   clearTerminal: (projectId) => set((s) => ({ terminal: s.terminal.filter((t) => t.projectId !== projectId || t.outcome === null) })),
@@ -146,8 +160,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const offApprovals = window.api.onApprovalsChanged((approvals) =>
       set((s) => ({ approvals, approvalsMinimized: approvals.length === 0 ? false : approvals.some((a) => !s.approvals.some((x) => x.id === a.id)) ? false : s.approvalsMinimized }))
     )
+    const offAuto = window.api.onAutomation((r) => get().applyAutomation([r]))
+    const offPrev = window.api.onPreview((i) => get().applyPreview(i))
     return () => {
       clearTimeout(timer)
+      offAuto()
+      offPrev()
       off()
       offTerm()
       offApprovals()

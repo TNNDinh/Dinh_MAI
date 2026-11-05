@@ -357,5 +357,17 @@ export const MIGRATIONS: Migration[] = [
     ALTER TABLE assets ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX idx_assets_parent ON assets(parent_asset_id);
     `
+  },
+  {
+    version: 6,
+    name: 'checkpoints_recovery',
+    sql: /* sql */ `
+    -- manual (you), auto (before an agent task) or safety (before a restore).
+    ALTER TABLE checkpoints ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual';
+    ALTER TABLE checkpoints ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX idx_checkpoints_project ON checkpoints(project_id, created_at);
+    -- Auto Recovery (opt-in per project): how many times a failed task may be rolled back and tried again.
+    ALTER TABLE projects ADD COLUMN auto_recovery INTEGER NOT NULL DEFAULT 0;
+    `
   }
 ]

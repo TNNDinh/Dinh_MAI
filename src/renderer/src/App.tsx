@@ -14,7 +14,10 @@ import { Agents } from './pages/Agents'
 import { Tasks } from './pages/Tasks'
 import { Assets } from './pages/Assets'
 import { Settings } from './pages/Settings'
+import { SourceControl } from './pages/SourceControl'
+import { Preview } from './pages/Preview'
 import { ApprovalDialog } from './components/ApprovalDialog'
+import { useWatchWorkspaceFolder } from './lib/use-workspace-project'
 
 // The workflow editor ships React Flow; load it the first time the page is opened.
 const WorkflowPage = lazy(() => import('./pages/Workflow').then((m) => ({ default: m.WorkflowPage })))
@@ -31,6 +34,8 @@ function PageHost() {
         <Workspace />
       </Suspense>
     )
+  if (page === 'source') return <SourceControl />
+  if (page === 'preview') return <Preview />
   if (page === 'agents') return <Agents />
   if (page === 'connections') return <Connections />
   if (page === 'tasks') return <Tasks />
@@ -76,6 +81,7 @@ function StatusBar() {
 const HIT = 8
 
 export function App() {
+  useWatchWorkspaceFolder()
   return (
     <div className="flex h-full flex-col">
       <TitleBar />
