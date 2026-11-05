@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0c10;
+  --color-panel: #0f1218;
+  --color-elev: #151922;
+  --color-hover: #1b202b;
+  --color-line: #222835;
+  --color-fg: #e7eaf0;
+  --color-muted: #8b94a5;
+  --color-faint: #5b6475;
+  --color-accent: #7c6cff;
+  --color-accent-soft: #7c6cff26;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-err: #f87171;
+  --color-info: #38bdf8;
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+input, textarea, [data-selectable] { user-select: text; }
+
+/* thin dark scrollbars */
+* { scrollbar-width: thin; scrollbar-color: #2a3040 transparent; }
+
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* resize handles */
+[data-separator] { background: var(--color-line); transition: background-color 120ms; }
+[data-separator][aria-orientation="vertical"] { width: 1px; }
+[data-separator][aria-orientation="horizontal"] { height: 1px; }
+[data-separator]:hover, [data-separator="active"] { background: var(--color-accent); }
+
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.page-enter { animation: fade-in 160ms ease-out; }
+@keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.pulse { animation: pulse-dot 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .page-enter, .pulse { animation: none; } }
+
+/* Transparency checkerboard behind pictures. */
+.checker {
+  background-color: #1c1c20;
+  background-image:
+    linear-gradient(45deg, #26262b 25%, transparent 25%, transparent 75%, #26262b 75%),
+    linear-gradient(45deg, #26262b 25%, transparent 25%, transparent 75%, #26262b 75%);
+  background-size: 14px 14px;
+  background-position:
+    0 0,
+    7px 7px;
+}
+
+/* ---- workflow editor (React Flow, dark) ---- */
+.react-flow {
+  --xy-background-color: var(--color-bg);
+  --xy-node-border-radius: 8px;
+  --xy-edge-stroke: #5b6475;
+  --xy-edge-stroke-selected: var(--color-accent);
+  --xy-handle-background-color: var(--color-muted);
+  --xy-controls-button-background-color: var(--color-elev);
+  --xy-controls-button-background-color-hover: var(--color-hover);
+  --xy-controls-button-color: var(--color-fg);
+  --xy-controls-button-border-color: var(--color-line);
+  --xy-minimap-background-color: var(--color-panel);
+  --xy-selection-background-color: rgb(124 108 255 / 0.12);
+  --xy-selection-border: 1px dotted var(--color-accent);
+}
+.react-flow__node { cursor: grab; }
+.react-flow__node:active { cursor: grabbing; }
+.react-flow__handle { transition: background-color 0.12s; }
+@keyframes wf-pulse { 0%, 100% { box-shadow: 0 0 0 1px var(--color-info), 0 0 0 0 rgb(56 189 248 / 0.35); } 50% { box-shadow: 0 0 0 1px var(--color-info), 0 0 14px 2px rgb(56 189 248 / 0.35); } }
+.wf-running { animation: wf-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .wf-running { animation: none; } }

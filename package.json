@@ -1,0 +1,38 @@
+{
+  "name": "multi-ai-dev-studio",
+  "productName": "Multi-AI Development Studio",
+  "version": "0.1.0",
+  "description": "Orchestrate multiple AI models as a collaborative development team",
+  "main": "./out/main/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "package": "electron-vite build && electron-builder --win",
+    "smoke": "electron-vite build && node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.4",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "electron": "^45.2.2",
+    "electron-vite": "^6.0.0",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.12.1",
+    "lucide-react": "^1.68.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-resizable-panels": "^4.18.0",
+    "zustand": "^5.0.16"
+  }
+}
